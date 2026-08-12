@@ -24,6 +24,7 @@ PostgreSQL, authentication, sessions, device identity, pairing, encryption of pa
 - Public documentation now identifies MCPaste, states the trust boundary, and directs contributors to concrete security and secret-handling rules.
 - Foundation configuration validates environment, HTTP address, and log level values, with tests for defaults, overrides, and rejected input.
 - The Go server exposes `GET /livez` and `GET /readyz`, returns redacted readiness failures, rejects unsupported methods, applies bounded HTTP timeouts, handles process signals, and shuts down gracefully.
+- The server binds its configured address before logging `server listening`; an occupied-address regression test proves bind failure cannot emit a false success log.
 - Access and recovery logs contain metadata only. They use the matched route pattern, or `<unmatched>`, rather than the raw URL path; tests cover path, query, body, authorization-header, and panic-value exclusion.
 - The multi-stage image builds a static server and runs it as `65532:65532` from `scratch`. The Docker context is default-deny and admits only `go.mod`, `cmd/**`, and `internal/**`.
 - CI covers pull requests and pushes to `main` with read-only repository permission, pinned actions, disabled checkout credential persistence, 15-minute job timeouts, Go formatting/vet/race/build/vulnerability checks, container build verification, and a redacting Gitleaks v8.24.3 CLI scan with a pinned archive checksum.
@@ -36,6 +37,7 @@ All commands below ran from the repository root during Task 8 acceptance or the 
 
 - `test -z "$(find cmd internal -type f -name '*.go' -exec gofmt -l {} +)"` — exit 0; no files required formatting.
 - `go test -race ./...` — exit 0; `cmd/server` had no test files, and `internal/config` plus `internal/httpserver` passed.
+- Post-acceptance correction: `go test ./cmd/server -run TestRunDoesNotLogListeningWhenAddressCannotBind -count=1` failed before the fix because `server listening` was logged for an occupied address, then passed after the bind-before-log change. A fresh `go test -race ./...` also passed with the new `cmd/server` regression test.
 - `go vet ./...` — exit 0 with no output.
 - `go build -o /tmp/mcpaste-server ./cmd/server` — exit 0.
 - `go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...` — exit 0 with `No vulnerabilities found.`
@@ -119,6 +121,14 @@ Tasks 1–7 produced these commits in repository order, with their existing subj
 
 The list above is limited to Tasks 1–7 implementation commits. This record and the Phase 2 plan are committed afterward as the documentation handoff and are intentionally excluded from that task list.
 
+Post-acceptance review produced these additional local commits before the final handoff update:
+
+1. `215de3b` — `docs: record foundation and plan identity server`
+2. `61d7b7e` — `docs: keep identity plan secret-scan clean`
+3. `a99b40d` — `fix: log server listening after bind`
+
+The updated roadmap, Phase 2 baseline assertions, and this record are included together in the final documentation commit with subject `docs: finalize foundation handoff`.
+
 ## Handoff status
 
 At the Task 8 evidence checkpoint, before the final documentation commit, `git status --short --branch --untracked-files=all` reported no tracked changes and exactly these two untracked handoff files:
@@ -178,4 +188,4 @@ The disposable ignore-test files `.env.local`, `example.key`, and `local.sqlite`
 
 ## Next safe step
 
-Review `docs/superpowers/plans/2026-08-12-mcpaste-identity-server.md`, include that plan and this record in the final documentation commit, and then execute only that Phase 2 plan as a separate phase. No Phase 2 implementation was started during Foundation work or while creating this record.
+The Foundation handoff and reviewed Phase 2 plan are committed locally. The next safe step is to execute only `docs/superpowers/plans/2026-08-12-mcpaste-identity-server.md` as a separate phase. No Phase 2 implementation was started during Foundation work or while updating this record.

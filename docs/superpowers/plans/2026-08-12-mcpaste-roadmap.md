@@ -25,7 +25,7 @@ Acceptance signal: `go test -race ./...`, `go vet ./...`, the server container h
 
 ## Phase 2: Workspace identity, pairing, and encrypted persistence
 
-**Planned document:** `docs/superpowers/plans/2026-08-12-mcpaste-identity-server.md`
+**Detailed plan:** `docs/superpowers/plans/2026-08-12-mcpaste-identity-server.md`
 
 Deliverables:
 

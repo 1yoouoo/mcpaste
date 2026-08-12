@@ -327,21 +327,27 @@ Run:
 ```bash
 test "$(git branch --show-current)" = "main"
 test -z "$(git status --porcelain)"
-test "$(git show -s --format=%s HEAD)" = "docs: keep identity plan secret-scan clean"
-test "$(git show -s --format=%s HEAD^)" = "docs: record foundation and plan identity server"
+test "$(git show -s --format=%s HEAD)" = "docs: finalize foundation handoff"
+test "$(git show -s --format=%s HEAD^)" = "fix: log server listening after bind"
+test "$(git show -s --format=%s HEAD^^)" = "docs: keep identity plan secret-scan clean"
+test "$(git show -s --format=%s HEAD^^^)" = "docs: record foundation and plan identity server"
 git merge-base --is-ancestor 4084a5f HEAD
-expected_baseline_paths=$'.gitleaksignore\ndocs/superpowers/plans/2026-08-12-mcpaste-identity-server.md\ndocs/superpowers/records/2026-08-12-mcpaste-foundation.md'
+expected_baseline_paths=$'.gitleaksignore\ncmd/server/main.go\ncmd/server/main_test.go\ndocs/superpowers/plans/2026-08-12-mcpaste-identity-server.md\ndocs/superpowers/plans/2026-08-12-mcpaste-roadmap.md\ndocs/superpowers/records/2026-08-12-mcpaste-foundation.md'
 expected_handoff_paths=$'docs/superpowers/plans/2026-08-12-mcpaste-identity-server.md\ndocs/superpowers/records/2026-08-12-mcpaste-foundation.md'
 expected_correction_paths=$'.gitleaksignore\ndocs/superpowers/plans/2026-08-12-mcpaste-identity-server.md'
+expected_runtime_fix_paths=$'cmd/server/main.go\ncmd/server/main_test.go'
+expected_final_docs_paths=$'docs/superpowers/plans/2026-08-12-mcpaste-identity-server.md\ndocs/superpowers/plans/2026-08-12-mcpaste-roadmap.md\ndocs/superpowers/records/2026-08-12-mcpaste-foundation.md'
 test "$(git diff --name-only 4084a5f..HEAD | sort)" = "$expected_baseline_paths"
-test "$(git diff-tree --no-commit-id --name-only -r HEAD | sort)" = "$expected_correction_paths"
-test "$(git diff-tree --no-commit-id --name-only -r HEAD^ | sort)" = "$expected_handoff_paths"
+test "$(git diff-tree --no-commit-id --name-only -r HEAD | sort)" = "$expected_final_docs_paths"
+test "$(git diff-tree --no-commit-id --name-only -r HEAD^ | sort)" = "$expected_runtime_fix_paths"
+test "$(git diff-tree --no-commit-id --name-only -r HEAD^^ | sort)" = "$expected_correction_paths"
+test "$(git diff-tree --no-commit-id --name-only -r HEAD^^^ | sort)" = "$expected_handoff_paths"
 go version
 go test -race ./cmd/server ./internal/config ./internal/httpserver
 go vet ./cmd/server ./internal/config ./internal/httpserver
 ```
 
-Expected: every Git assertion exits 0, proving a clean current `main`, exact handoff and secret-scan correction subjects, `4084a5f` as an ancestor, and exactly two baseline commits. The handoff commit changes the Foundation record and this Phase 2 plan; its correction changes only this plan plus the single-fingerprint Gitleaks ignore file. Their combined path set contains only those three files. Go reports `go1.26.5`, and both Foundation Go checks pass. Do not require `HEAD` to equal `4084a5f`; stop if either subject differs or any other path differs between `4084a5f` and `HEAD`.
+Expected: every Git assertion exits 0, proving a clean current `main`, the exact four post-Foundation subjects, `4084a5f` as an ancestor, and their exact file boundaries. The two handoff commits contain plans and the Foundation record, the secret-scan correction contains only this plan and the single-fingerprint ignore, and the reviewed runtime correction contains only `main.go` plus its regression test. Go reports `go1.26.5`, and both Foundation Go checks pass. Do not require `HEAD` to equal `4084a5f`; stop if any subject, path boundary, or combined path set differs.
 
 - [ ] **Step 2: Verify current primary module metadata without changing the module**
 
@@ -10274,7 +10280,7 @@ if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
 fi
 git diff --quiet
 git diff --cached --quiet
-test "$(git show -s --format=%s HEAD~13)" = 'docs: keep identity plan secret-scan clean'
+test "$(git show -s --format=%s HEAD~13)" = 'docs: finalize foundation handoff'
 expected_subjects="$(printf '%s\n' \
   'build: add PostgreSQL identity dependencies' \
   'feat: add identity schema migrations' \
@@ -10297,7 +10303,7 @@ fi
 BASH
 ```
 
-Expected: the focused subshell exits 130 for `INT` and 143 for `TERM`, proving the signal handlers convert interruption to failure before the EXIT cleanup preserves that status. Tracked, staged, and untracked worktree state is empty; ignored `coverage.out` may remain. `HEAD~13` has the exact documentation baseline correction subject `docs: keep identity plan secret-scan clean`, and the latest 13 subjects byte-match the listed Phase 2 sequence in chronological order. A dirty tree, missing baseline, extra/reordered/squashed commit, or subject mismatch exits nonzero with generic metadata. Nothing is pushed, deployed, tagged, released, or added to a remote.
+Expected: the focused subshell exits 130 for `INT` and 143 for `TERM`, proving the signal handlers convert interruption to failure before the EXIT cleanup preserves that status. Tracked, staged, and untracked worktree state is empty; ignored `coverage.out` may remain. `HEAD~13` has the exact final Foundation handoff subject `docs: finalize foundation handoff`, and the latest 13 subjects byte-match the listed Phase 2 sequence in chronological order. A dirty tree, missing baseline, extra/reordered/squashed commit, or subject mismatch exits nonzero with generic metadata. Nothing is pushed, deployed, tagged, released, or added to a remote.
 
 - [ ] **Step 11: Record the execution handoff in the final response**
 
@@ -10354,7 +10360,7 @@ Before calling Phase 2 complete, the execution worker must answer each item with
 - [ ] Hosted CI runs `go mod tidy -diff` and `go mod verify`, and every compile/test/vet/build command uses `GOFLAGS=-mod=readonly`; secret-pattern checks accept only no-match status and never print matches.
 - [ ] Final acceptance uses only per-block disposable databases and ephemeral keyrings; each Compose cold start uses `--wait --wait-timeout 60`; loopback port 18082 is preflighted; every acceptance curl is guarded by both `kill -0` and exact spawned-PID LISTEN ownership before the request and checked after credential-bearing responses; every cleanup registers EXIT separately, maps INT to 130 and TERM to 143, disables all three traps inside cleanup, and preserves fail-closed database-drop status promotion.
 - [ ] Local Gitleaks clones tracked full history with `git clone --no-local`, proves local secret paths absent, mounts only that clone read-only into the digest-pinned scanner container, and suppresses finding content.
-- [ ] The final Git gate requires no tracked, staged, or untracked changes, the exact documentation handoff subject at `HEAD~13`, and a byte-exact chronological list of all 13 planned implementation commit subjects.
+- [ ] The final Git gate requires no tracked, staged, or untracked changes, the exact final Foundation handoff subject at `HEAD~13`, and a byte-exact chronological list of all 13 planned implementation commit subjects.
 
 ## References
 
@@ -10398,7 +10404,7 @@ Completed on 2026-08-12 against the saved plan after the final security and acce
 - Canonical-secret evidence: one expected-length/strict/round-trip decoder has seven parser call sites covering encryption-key material, bearer locator and secret, claim secret, and recovery locator and secret. Six CR and six LF test cases cover those formats. The only direct `RawURLEncoding.Strict().DecodeString` call is inside that helper.
 - Argon2 admission evidence: the complete `argon2.go` block contains one exported concrete `RecoveryPermit` handle with exactly one field (`state *recoveryPermitState`), one unexported shared-state type, zero permit interfaces, zero `permitState` helpers/accessors, exact `*RecoveryPermit` acquire/derive signatures, and exactly one `argon2.IDKey` call. Five focused permit test declarations cover nil/zero rejection, copied-handle shared state and single release, same-handle derivation serialization, release waiting for active derivation, and sequential generation/verification; the process-capacity test and third-recovery cancellation-before-database test remain present.
 - Gitleaks execution evidence: the pre-commit disposable `git clone --no-local` scan verified the scanner image, archive checksum, and clean-clone isolation but could not cover this then-untracked plan. After the handoff commit, a fresh redacted full-history scan reported one `curl-auth-header` finding in this plan and no other finding; metadata-only diagnostics identified the intentional logging-test header without printing its marker value. The current header name is assembled at execution time while preserving the runtime request. Because the historical commit remains reachable, `.gitleaksignore` admits only that exact false-positive fingerprint; it does not ignore the file, rule, current source, or any future finding. The required post-correction full-history scan in the final Foundation verification covers the committed plan, exact ignore, and correction.
-- Final static boundary evidence: the word-family placeholder scan returned zero matches without treating normal Go variadic syntax as a placeholder. Unsafe working-tree scanner mounts, fail-open disposable-database drops, plain non-waiting Compose starts, and mutable external runtime-image invocations returned zero matches. Task 1 asserts both baseline subjects and their exact three-file combined boundary; the final gate checks the latest correction subject at `HEAD~13`.
+- Final static boundary evidence: the word-family placeholder scan returned zero matches without treating normal Go variadic syntax as a placeholder. Unsafe working-tree scanner mounts, fail-open disposable-database drops, plain non-waiting Compose starts, and mutable external runtime-image invocations returned zero matches. Task 1 now asserts all four post-Foundation subjects and exact file boundaries, including the reviewed bind-before-log correction; the final gate checks the final handoff subject at `HEAD~13`.
 - Whitespace and workspace evidence: at the plan-authoring checkpoint, `git diff --check` exited zero. `git diff --no-index --check /dev/null docs/superpowers/plans/2026-08-12-mcpaste-identity-server.md` returned the expected status 1 because the then-untracked plan differed from `/dev/null`, with zero `trailing whitespace` or `space before tab` diagnostics. `git status --short --branch` then showed `main`, this plan, and the separate Foundation record as untracked; the final Foundation verification reruns whitespace and worktree checks after both documentation commits.
 
 These results verify plan text, block syntax, selected static invariants, and the isolated scanner command only. They do not compile or execute the planned Phase 2 implementation, run its module graph, start PostgreSQL, or run its unit/integration tests.
