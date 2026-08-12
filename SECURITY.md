@@ -10,7 +10,7 @@ MCPaste is in early development and has no supported release. Design requirement
 - Never put secrets in examples, fixtures, logs, screenshots, issues, or pull requests.
 - Use fake, deterministic examples that are visibly non-functional.
 - Do not log request or response bodies, authentication headers, cookies, QR codes, or secret-bearing URLs.
-- Keep generated Codex, Claude, Keychain, and Linux credentials outside the repository.
+- Keep generated Codex and Claude Code connection files, macOS Keychain values, and Linux credential-store data outside the repository.
 - Scope production encryption keys, database credentials, Apple credentials, and deployment keys narrowly.
 
 ## Trust boundary
@@ -26,4 +26,4 @@ The server can decrypt MCPaste data. TLS in transit and encryption at rest do no
 
 ## Reporting a vulnerability
 
-Please use the repository's private vulnerability reporting channel rather than a public issue. Include reproduction steps, impact, affected version or commit, and mitigation details where available. Do not include a live secret or other sensitive payload; use a fake deterministic example instead.
+Use GitHub private vulnerability reporting when it is enabled. If it is unavailable, contact the maintainer using the contact details on their GitHub profile; do not send vulnerability details in a public issue. Include reproduction steps, impact, affected version or commit, and mitigation details where available. Do not include a live secret or other sensitive payload; use a fake deterministic example instead.

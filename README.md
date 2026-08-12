@@ -14,7 +14,7 @@ MCPaste is a macOS menu bar app that deliberately hands plain text and static im
 
 ## Trust model
 
-MCPaste is not end-to-end encrypted: the service decrypts data. TLS protects data in transit and application encryption protects data at rest, but an operator or a full server compromise can read it. Retention by downstream AI tools and providers is outside MCPaste's control.
+MCPaste is not end-to-end encrypted: the service decrypts data. The approved design plans TLS for data in transit and application-level encryption for stored text bodies and image files, but an operator or a full server compromise can read the data. Retention by downstream AI tools and providers is outside MCPaste's control.
 
 See [Security and secrets](docs/security-and-secrets.md) and the [Security Policy](SECURITY.md).
 
