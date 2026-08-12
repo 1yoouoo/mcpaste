@@ -13,8 +13,8 @@
 *.pem
 *.p12
 *.mobileprovision
-secrets/
-.secrets
+/secrets/
+/.secrets/
 
 # Local databases and application data
 *.db
@@ -22,11 +22,11 @@ secrets/
 *.sqlite
 *.sqlite3
 *.sqlite-*
-data/
-var/
+/data/
+/var/
 
 # Go
-bin/
+/bin/
 coverage.out
 mcpaste-server
 
@@ -39,7 +39,7 @@ xcuserdata/
 
 # General build and dependency output
 *.log
-coverage/
-dist/
-build/
-node_modules/
+/coverage/
+/dist/
+/build/
+/node_modules/
