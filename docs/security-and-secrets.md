@@ -8,7 +8,7 @@ MCPaste is a central server, not an end-to-end encrypted system. Paste text and 
 | --- | --- | --- |
 | Paste text/images | App cache locally; encrypted production database and image volume in production | Git, environment files, logs, screenshots, issues, or pull requests |
 | Full Mac credentials | macOS Keychain | App bundle, repository, user defaults, or logs |
-| Linux connector credential | System credential store or a user-owned file with mode `0600` | Shell history, URL query strings, repository, or world-readable configuration |
+| Linux connector credential | System credential store or a user-owned file with mode `0600` | Shell history, URLs, repository, or world-readable configuration |
 | Production encryption key | `/etc/mcpaste/server.env`, root-owned and mode `0600` | GitHub Actions, container/image contents, app, connector, or repository |
 | Database/session secrets | The same `/etc/mcpaste/server.env` file | Public Compose configuration, CI logs, or clients |
 | Deployment SSH key | Protected GitHub production environment | Repository, Droplet image, or pull-request jobs |
@@ -41,7 +41,7 @@ The production server environment is written directly on the Droplet at `/etc/mc
 
 ## Logging and capture safety
 
-Allowed operational metadata includes timestamps, request or connection identifiers, status, duration, route name, and coarse error class. Logs explicitly exclude paste bodies, query strings, authentication headers, cookies, device credentials, recovery codes, pairing codes, QR data, and image data. Avoid capture by construction: do not log request bodies, do not serialize credential-bearing requests, and keep diagnostics separate from paste storage.
+Allowed operational metadata is limited to timestamp, request ID, method, route path, status, duration, object ID, size, and count. Logs explicitly exclude all request and response bodies, query strings, authentication headers, cookies, device credentials, recovery codes, pairing codes, QR data, and image bytes. Avoid capture by construction: do not log request or response bodies, do not serialize credential-bearing requests, and keep diagnostics separate from paste storage.
 
 ## Incident response
 
