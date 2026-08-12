@@ -44,4 +44,4 @@ go run ./cmd/server
 
 Never use real secrets in environment files, fixtures, logs, screenshots, issues, or pull requests. Use visibly fake deterministic examples such as `example-token-not-real`.
 
-Read the [approved system design](docs/system-design.md) and [implementation roadmap](docs/implementation-roadmap.md) for the current direction.
+Read the [approved system design](docs/superpowers/specs/2026-08-12-mcpaste-system-design.md) and [implementation roadmap](docs/superpowers/plans/2026-08-12-mcpaste-roadmap.md) for the current direction.
