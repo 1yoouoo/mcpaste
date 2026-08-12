@@ -1,0 +1,45 @@
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Local environment files; keep only the safe template tracked
+.env
+.env.*
+!.env.example
+
+# Private key and signing material
+*.key
+*.pem
+*.p12
+*.mobileprovision
+secrets/
+.secrets
+
+# Local databases and application data
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+data/
+var/
+
+# Go
+bin/
+coverage.out
+mcpaste-server
+
+# Swift/Xcode
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# General build and dependency output
+*.log
+coverage/
+dist/
+build/
+node_modules/
