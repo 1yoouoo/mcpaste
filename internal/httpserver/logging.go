@@ -20,12 +20,41 @@ func NewAccessLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler
 
 			logger.Info("http request",
 				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				slog.String("path", safeRoute(r.Pattern)),
 				slog.Int("status", response.status),
 				slog.Int64("duration_ms", time.Since(started).Milliseconds()),
 			)
 		})
 	}
+}
+
+func NewRecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if recover() != nil {
+					logger.Error("http panic recovered",
+						slog.String("method", r.Method),
+						slog.String("path", safeRoute(r.Pattern)),
+					)
+					http.Error(w, "internal server error", http.StatusInternalServerError)
+				}
+			}()
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func safeRoute(pattern string) string {
+	if pattern == "" {
+		return "<unmatched>"
+	}
+	return pattern
 }
 
 type statusWriter struct {

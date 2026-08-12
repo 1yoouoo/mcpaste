@@ -29,7 +29,9 @@ func run() error {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
-	handler := httpserver.NewAccessLogMiddleware(logger)(httpserver.NewHandler(nil))
+	handler := httpserver.NewRecoveryMiddleware(logger)(
+		httpserver.NewAccessLogMiddleware(logger)(httpserver.NewHandler(nil)),
+	)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
