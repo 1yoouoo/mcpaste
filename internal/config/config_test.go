@@ -1,87 +1,110 @@
 package config
 
 import (
+	"encoding/base64"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestLoadDefaults(t *testing.T) {
-	cfg, err := Load(mapLookup(nil))
+func TestLoadDefaultsWithRequiredSecrets(t *testing.T) {
+	cfg, err := Load(mapLookup(requiredValues()))
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatal("Load() returned an error for valid defaults")
 	}
-
 	if cfg.Environment != Development {
-		t.Fatalf("Environment = %q, want %q", cfg.Environment, Development)
+		t.Fatalf("environment = %q", cfg.Environment)
 	}
 	if cfg.HTTPAddr != ":8080" {
-		t.Fatalf("HTTPAddr = %q, want :8080", cfg.HTTPAddr)
+		t.Fatalf("HTTP address = %q", cfg.HTTPAddr)
 	}
 	if cfg.LogLevel != slog.LevelInfo {
-		t.Fatalf("LogLevel = %v, want %v", cfg.LogLevel, slog.LevelInfo)
+		t.Fatalf("log level = %v", cfg.LogLevel)
+	}
+	if cfg.DatabaseURL == "" {
+		t.Fatal("database URL is empty")
+	}
+	if cfg.ActiveKeyID != "test-key" {
+		t.Fatalf("active key ID = %q", cfg.ActiveKeyID)
+	}
+	if cfg.EncryptionKeys == "" {
+		t.Fatal("encryption keyring is empty")
+	}
+	if cfg.CleanupInterval != 15*time.Minute || len(cfg.TrustedProxyCIDRs) != 0 {
+		t.Fatalf("cleanup/proxies = %v/%d", cfg.CleanupInterval, len(cfg.TrustedProxyCIDRs))
 	}
 }
 
 func TestLoadOverrides(t *testing.T) {
-	cfg, err := Load(mapLookup(map[string]string{
-		"MCPASTE_ENV":       "production",
-		"MCPASTE_HTTP_ADDR": "127.0.0.1:9090",
-		"MCPASTE_LOG_LEVEL": "debug",
-	}))
+	values := requiredValues()
+	values["MCPASTE_ENV"] = "production"
+	values["MCPASTE_HTTP_ADDR"] = "127.0.0.1:9090"
+	values["MCPASTE_LOG_LEVEL"] = "debug"
+	values["MCPASTE_CLEANUP_INTERVAL"] = "10m"
+	values["MCPASTE_TRUSTED_PROXY_CIDRS"] = "127.0.0.1/32,10.0.0.0/8"
+	cfg, err := Load(mapLookup(values))
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatal("Load() returned an error for valid overrides")
 	}
-
 	if cfg.Environment != Production {
-		t.Fatalf("Environment = %q, want %q", cfg.Environment, Production)
+		t.Fatalf("environment = %q", cfg.Environment)
 	}
 	if cfg.HTTPAddr != "127.0.0.1:9090" {
-		t.Fatalf("HTTPAddr = %q, want 127.0.0.1:9090", cfg.HTTPAddr)
+		t.Fatalf("HTTP address = %q", cfg.HTTPAddr)
 	}
 	if cfg.LogLevel != slog.LevelDebug {
-		t.Fatalf("LogLevel = %v, want %v", cfg.LogLevel, slog.LevelDebug)
+		t.Fatalf("log level = %v", cfg.LogLevel)
+	}
+	if cfg.CleanupInterval != 10*time.Minute || len(cfg.TrustedProxyCIDRs) != 2 {
+		t.Fatalf("cleanup/proxies = %v/%d", cfg.CleanupInterval, len(cfg.TrustedProxyCIDRs))
 	}
 }
 
-func TestLoadRejectsInvalidValues(t *testing.T) {
+func TestLoadRejectsInvalidValuesWithoutEchoingSecrets(t *testing.T) {
 	tests := []struct {
-		name    string
-		values  map[string]string
-		wantErr string
+		name  string
+		key   string
+		value string
 	}{
-		{
-			name:    "environment",
-			values:  map[string]string{"MCPASTE_ENV": "staging"},
-			wantErr: "MCPASTE_ENV",
-		},
-		{
-			name:    "address",
-			values:  map[string]string{"MCPASTE_HTTP_ADDR": "8080"},
-			wantErr: "MCPASTE_HTTP_ADDR",
-		},
-		{
-			name:    "port",
-			values:  map[string]string{"MCPASTE_HTTP_ADDR": ":70000"},
-			wantErr: "MCPASTE_HTTP_ADDR",
-		},
-		{
-			name:    "log level",
-			values:  map[string]string{"MCPASTE_LOG_LEVEL": "verbose"},
-			wantErr: "MCPASTE_LOG_LEVEL",
-		},
+		{name: "environment", key: "MCPASTE_ENV", value: "staging"},
+		{name: "address", key: "MCPASTE_HTTP_ADDR", value: "8080"},
+		{name: "log level", key: "MCPASTE_LOG_LEVEL", value: "verbose"},
+		{name: "database", key: "MCPASTE_DATABASE_URL", value: "database-secret-marker"},
+		{name: "active key", key: "MCPASTE_ACTIVE_KEY_ID", value: "bad key"},
+		{name: "keyring", key: "MCPASTE_ENCRYPTION_KEYS", value: "keyring-secret-marker"},
+		{name: "cleanup", key: "MCPASTE_CLEANUP_INTERVAL", value: "2s"},
+		{name: "proxy", key: "MCPASTE_TRUSTED_PROXY_CIDRS", value: "proxy-secret-marker"},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := Load(mapLookup(tt.values))
+	for _, item := range tests {
+		t.Run(item.name, func(t *testing.T) {
+			values := requiredValues()
+			values[item.key] = item.value
+			_, err := Load(mapLookup(values))
 			if err == nil {
-				t.Fatal("Load() error = nil, want error")
+				t.Fatal("Load() error = nil")
 			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("Load() error = %q, want it to contain %q", err, tt.wantErr)
+			if strings.Contains(err.Error(), item.value) {
+				t.Fatal("configuration error echoed the rejected value")
 			}
 		})
+	}
+}
+
+func TestLoadRequiresTrustedProxyInProduction(t *testing.T) {
+	values := requiredValues()
+	values["MCPASTE_ENV"] = "production"
+	if _, err := Load(mapLookup(values)); err == nil {
+		t.Fatal("production without trusted proxy accepted")
+	}
+}
+
+func requiredValues() map[string]string {
+	key := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	return map[string]string{
+		"MCPASTE_DATABASE_URL":    "postgres://mcpaste:mcpaste-local-only-not-production@127.0.0.1:55439/mcpaste?sslmode=disable",
+		"MCPASTE_ACTIVE_KEY_ID":   "test-key",
+		"MCPASTE_ENCRYPTION_KEYS": "test-key:" + key,
 	}
 }
 
