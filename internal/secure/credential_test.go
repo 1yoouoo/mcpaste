@@ -104,3 +104,13 @@ func TestClaimSecretRejectsNoncanonicalValues(t *testing.T) {
 		})
 	}
 }
+
+func TestNewUUIDSetsVersionAndVariant(t *testing.T) {
+	got, err := NewUUID(bytes.NewReader(bytes.Repeat([]byte{0xff}, 16)))
+	if err != nil {
+		t.Fatalf("NewUUID() error = %v", err)
+	}
+	if got != "ffffffff-ffff-4fff-bfff-ffffffffffff" {
+		t.Fatalf("NewUUID() = %q", got)
+	}
+}
