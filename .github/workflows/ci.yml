@@ -74,7 +74,7 @@ jobs:
           GOFLAGS=-mod=readonly CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/mcpaste-linux-arm64 ./cmd/mcpaste
 
       - name: Check known Go vulnerabilities
-		run: GOFLAGS=-mod=readonly go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./cmd/migrate ./cmd/mcpaste ./cmd/server ./db/migrations ./internal/config ./internal/connector ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/mcpserver ./internal/secure ./internal/testdb
+        run: GOFLAGS=-mod=readonly go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./cmd/migrate ./cmd/mcpaste ./cmd/server ./db/migrations ./internal/config ./internal/connector ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/mcpserver ./internal/secure ./internal/testdb
 
   container:
     name: Container build
