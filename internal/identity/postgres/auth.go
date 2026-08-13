@@ -27,11 +27,14 @@ where c.workspace_id = $1::uuid and c.token_id = $2
 	if err != nil {
 		return identity.Principal{}, err
 	}
-	_, err = s.pool.Exec(ctx, `
+	command, err := s.pool.Exec(ctx, `
 update credentials set last_used_at = $3
 where workspace_id = $1::uuid and token_id = $2 and revoked_at is null`, workspaceID, locator, now)
 	if err != nil {
 		return identity.Principal{}, err
+	}
+	if command.RowsAffected() != 1 {
+		return identity.Principal{}, identity.ErrUnauthorized
 	}
 	return principal, nil
 }

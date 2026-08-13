@@ -8,6 +8,9 @@ import (
 )
 
 func (s *Store) ConsumeRateLimit(ctx context.Context, rule identity.RateRule, subjectHash []byte, now time.Time) (identity.RateDecision, error) {
+	if rule.Window <= 0 {
+		return identity.RateDecision{}, identity.ErrInvalid
+	}
 	resetBefore := now.Add(-rule.Window)
 	rowExpires := now.Add(rule.Window + identity.RateLimitRetention)
 	var count int

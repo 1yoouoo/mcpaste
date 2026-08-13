@@ -10,6 +10,7 @@ import (
 	"github.com/1yoouoo/mcpaste/internal/identity"
 	"github.com/1yoouoo/mcpaste/internal/secure"
 	"github.com/1yoouoo/mcpaste/internal/testdb"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const workspaceOne = "00000000-0000-4000-8000-000000000101"
@@ -50,6 +51,99 @@ func TestWorkspaceScopedCredentialAuthentication(t *testing.T) {
 	}
 }
 
+func TestAuthenticateRejectsCredentialRevokedBeforeLastUsedUpdate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool := testdb.New(t)
+	store := New(pool)
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	hash := bytes.Repeat([]byte{0x43}, 32)
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceOne, now); err != nil {
+			return err
+		}
+		if _, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: deviceOne, DisplayName: "Race Mac", Platform: "macos", Role: "full", CreatedAt: now,
+		}); err != nil {
+			return err
+		}
+		return tx.InsertCredential(ctx, workspaceOne, identity.CredentialRecord{
+			DeviceID: deviceOne, Locator: "BBBBBBBBBBBBBBBBBBBBBB", Scope: "full", Hash: hash, CreatedAt: now,
+		})
+	})
+	if err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+
+	lockTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin credential lock: %v", err)
+	}
+	defer func() { _ = lockTx.Rollback(context.Background()) }()
+	if _, err := lockTx.Exec(ctx, `
+select 1 from credentials
+where workspace_id = $1::uuid and token_id = $2
+for update`, workspaceOne, "BBBBBBBBBBBBBBBBBBBBBB"); err != nil {
+		t.Fatalf("lock credential: %v", err)
+	}
+
+	type authenticationResult struct {
+		principal identity.Principal
+		err       error
+	}
+	result := make(chan authenticationResult, 1)
+	go func() {
+		principal, err := store.Authenticate(ctx, workspaceOne, "BBBBBBBBBBBBBBBBBBBBBB", hash, now.Add(time.Minute))
+		result <- authenticationResult{principal: principal, err: err}
+	}()
+	waitForBlockedLastUsedUpdate(t, ctx, pool)
+
+	if _, err := lockTx.Exec(ctx, `
+update credentials set revoked_at = $3
+where workspace_id = $1::uuid and token_id = $2`, workspaceOne, "BBBBBBBBBBBBBBBBBBBBBB", now); err != nil {
+		t.Fatalf("revoke credential: %v", err)
+	}
+	if err := lockTx.Commit(ctx); err != nil {
+		t.Fatalf("commit credential revocation: %v", err)
+	}
+
+	got := <-result
+	if !errors.Is(got.err, identity.ErrUnauthorized) {
+		t.Fatalf("Authenticate() error = %v", got.err)
+	}
+	if got.principal != (identity.Principal{}) {
+		t.Fatalf("Authenticate() principal = %#v", got.principal)
+	}
+}
+
+func waitForBlockedLastUsedUpdate(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `
+select exists(
+    select 1
+    from pg_stat_activity
+    where datname = current_database()
+      and pid <> pg_backend_pid()
+      and wait_event_type = 'Lock'
+      and position('update credentials set last_used_at' in query) > 0
+)`).Scan(&waiting); err != nil {
+			t.Fatalf("inspect blocked authentication update: %v", err)
+		}
+		if waiting {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("authentication update did not block on credential row")
+		case <-ticker.C:
+		}
+	}
+}
+
 func TestDeviceNameSuffixIsWorkspaceLocalAndCaseInsensitive(t *testing.T) {
 	ctx := context.Background()
 	store := New(testdb.New(t))
@@ -77,6 +171,46 @@ func TestDeviceNameSuffixIsWorkspaceLocalAndCaseInsensitive(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("device suffix transaction: %v", err)
+	}
+}
+
+func TestDeviceNameSuffixUsesUnicodeCaseFolding(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceOne, now); err != nil {
+			return err
+		}
+		first, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: deviceOne, DisplayName: "Straße", Platform: "macos", Role: "full", CreatedAt: now,
+		})
+		if err != nil || first.DisplayName != "Straße" {
+			t.Fatalf("first device = %#v, %v", first, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed Unicode device: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+update devices set revoked_at = $2
+where workspace_id = $1::uuid`, workspaceOne, now); err != nil {
+		t.Fatalf("revoke Unicode device: %v", err)
+	}
+
+	err = store.WithinTx(ctx, func(tx identity.TxStore) error {
+		second, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: "00000000-0000-4000-8000-000000000204", DisplayName: "STRASSE", Platform: "macos", Role: "full", CreatedAt: now,
+		})
+		if err != nil || second.DisplayName != "STRASSE (2)" {
+			t.Fatalf("second device = %#v, %v", second, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Unicode case-fold insertion: %v", err)
 	}
 }
 
@@ -169,6 +303,36 @@ where scope = $1 and subject_hash = $2`, rule.Scope, subjectHash).Scan(
 	}
 	if !storedExpires.Equal(wantExpires) {
 		t.Fatal("reset expires_at differs from window end plus retention")
+	}
+}
+
+func TestRateLimitRejectsNonPositiveWindowWithoutPersistence(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		window time.Duration
+	}{
+		{name: "zero", window: 0},
+		{name: "negative", window: -time.Minute},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := testdb.New(t)
+			store := New(pool)
+			_, err := store.ConsumeRateLimit(ctx, identity.RateRule{
+				Scope: "workspace.create", Limit: 2, Window: test.window,
+			}, bytes.Repeat([]byte{0x63}, 32), time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC))
+			if !errors.Is(err, identity.ErrInvalid) {
+				t.Errorf("ConsumeRateLimit() error = %v", err)
+			}
+
+			var rows int
+			if err := pool.QueryRow(ctx, "select count(*) from rate_limit_buckets").Scan(&rows); err != nil {
+				t.Fatalf("count rate-limit rows: %v", err)
+			}
+			if rows != 0 {
+				t.Fatalf("rate-limit rows = %d", rows)
+			}
+		})
 	}
 }
 

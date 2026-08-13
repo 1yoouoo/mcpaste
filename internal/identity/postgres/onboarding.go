@@ -7,6 +7,7 @@ import (
 
 	"github.com/1yoouoo/mcpaste/internal/identity"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/text/cases"
 )
 
 func (s *txStore) InsertWorkspace(ctx context.Context, workspaceID string, createdAt time.Time) error {
@@ -20,16 +21,14 @@ func (s *txStore) InsertDevice(ctx context.Context, workspaceID string, device i
 	}
 	for attempt := 1; attempt <= 9999; attempt++ {
 		candidate := identity.DisplayNameCandidate(device.DisplayName, attempt)
-		var exists bool
-		if err := s.tx.QueryRow(ctx, `
-select exists(select 1 from devices where workspace_id = $1::uuid and lower(display_name) = lower($2))`,
-			workspaceID, candidate).Scan(&exists); err != nil {
+		exists, err := s.deviceDisplayNameExists(ctx, workspaceID, "", candidate)
+		if err != nil {
 			return identity.Device{}, err
 		}
 		if exists {
 			continue
 		}
-		_, err := s.tx.Exec(ctx, `
+		_, err = s.tx.Exec(ctx, `
 insert into devices(id, workspace_id, display_name, platform, role, created_at)
 values ($1::uuid, $2::uuid, $3, $4, $5, $6)`,
 			device.ID, workspaceID, candidate, device.Platform, device.Role, device.CreatedAt,
@@ -41,6 +40,34 @@ values ($1::uuid, $2::uuid, $3, $4, $5, $6)`,
 		return device, nil
 	}
 	return identity.Device{}, identity.ErrInvalid
+}
+
+func (s *txStore) deviceDisplayNameExists(ctx context.Context, workspaceID, excludedDeviceID, candidate string) (bool, error) {
+	rows, err := s.tx.Query(ctx, `
+select id::text, display_name
+from devices
+where workspace_id = $1::uuid`, workspaceID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	folder := cases.Fold()
+	foldedCandidate := folder.String(candidate)
+	for rows.Next() {
+		var deviceID string
+		var displayName string
+		if err := rows.Scan(&deviceID, &displayName); err != nil {
+			return false, err
+		}
+		if deviceID != excludedDeviceID && folder.String(displayName) == foldedCandidate {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func (s *txStore) InsertCredential(ctx context.Context, workspaceID string, record identity.CredentialRecord) error {
