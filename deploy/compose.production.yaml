@@ -67,7 +67,7 @@ services:
       POSTGRES_DB: mcpaste
       POSTGRES_USER: mcpaste
     volumes:
-      - mcpaste-postgres:/var/lib/postgresql/data
+      - mcpaste-postgres:/var/lib/postgresql
     networks:
       - private
     healthcheck:
