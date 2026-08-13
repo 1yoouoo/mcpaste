@@ -25,6 +25,7 @@ type identityAPI interface {
 	DeletePaste(context.Context, identity.Principal, string, string) (identity.Result, error)
 	ListPastes(context.Context, identity.Principal) ([]identity.PasteResponse, error)
 	Sync(context.Context, identity.Principal, int64, int) (identity.SyncResponse, error)
+	LatestPaste(context.Context, identity.Principal) (identity.LatestPaste, error)
 }
 
 func authenticate(r *http.Request, service identityAPI) (identity.Principal, error) {

@@ -8,15 +8,17 @@ import (
 	"strings"
 
 	"github.com/1yoouoo/mcpaste/internal/identity"
+	"github.com/1yoouoo/mcpaste/internal/mcpserver"
 )
 
 type apiServer struct {
 	identity identityAPI
 	proxies  []*net.IPNet
+	mcp      http.Handler
 }
 
 func NewApplicationHandler(readiness ReadinessFunc, service identityAPI, proxies []*net.IPNet) http.Handler {
-	server := &apiServer{identity: service, proxies: proxies}
+	server := &apiServer{identity: service, proxies: proxies, mcp: mcpserver.NewHandler(service)}
 	mux := http.NewServeMux()
 	registerHealth(mux, readiness)
 	mux.HandleFunc("POST /v1/workspaces", server.createWorkspace)
@@ -35,6 +37,8 @@ func NewApplicationHandler(readiness ReadinessFunc, service identityAPI, proxies
 	mux.HandleFunc("GET /v1/pastes", server.listPastes)
 	mux.HandleFunc("GET /v1/sync", server.sync)
 	mux.HandleFunc("GET /v1/events", server.events)
+	mux.HandleFunc("GET /v1/mcp", server.mcpEndpoint)
+	mux.HandleFunc("POST /v1/mcp", server.mcpEndpoint)
 	return v1MethodGuard(mux)
 }
 
@@ -74,6 +78,8 @@ func v1RouteMethods(path string) ([]string, bool) {
 		return []string{http.MethodGet}, true
 	case "/v1/events":
 		return []string{http.MethodGet}, true
+	case "/v1/mcp":
+		return []string{http.MethodGet, http.MethodPost}, true
 	}
 	parts := strings.Split(strings.TrimPrefix(path, "/v1/"), "/")
 	if len(parts) == 2 && parts[0] == "pairing-requests" && parts[1] != "" {

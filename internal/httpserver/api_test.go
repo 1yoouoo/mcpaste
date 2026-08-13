@@ -70,6 +70,9 @@ func (f *fakeIdentityAPI) ListPastes(context.Context, identity.Principal) ([]ide
 func (f *fakeIdentityAPI) Sync(context.Context, identity.Principal, int64, int) (identity.SyncResponse, error) {
 	return identity.SyncResponse{}, identity.ErrForbidden
 }
+func (f *fakeIdentityAPI) LatestPaste(context.Context, identity.Principal) (identity.LatestPaste, error) {
+	return identity.LatestPaste{}, identity.ErrForbidden
+}
 
 func TestWorkspaceCreateUsesStrictJSON(t *testing.T) {
 	largeBody := `{"device_name":"` + strings.Repeat("a", 4060) + `","platform":"macos"}`

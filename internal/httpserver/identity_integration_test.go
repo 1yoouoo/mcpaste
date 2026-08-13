@@ -22,6 +22,7 @@ import (
 	"github.com/1yoouoo/mcpaste/internal/secure"
 	"github.com/1yoouoo/mcpaste/internal/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type mutableClock struct {
@@ -556,6 +557,82 @@ func TestSSEEmitsMetadataOnlyAndPollingCatchesUp(t *testing.T) {
 	if status != http.StatusOK || !bytes.Contains(syncBody, []byte("sse secret body")) {
 		t.Fatalf("polling fallback status/body = %d/%q", status, syncBody)
 	}
+}
+
+func TestAuthenticatedMCPExposesOnlyLatestPasteAndTracksAccess(t *testing.T) {
+	h := newIntegrationHarness(t)
+	workspace, _, _ := h.createWorkspace("MCP Mac")
+	fullToken := credential(workspace, "full")
+	connectorToken := credential(workspace, "connector")
+	status, _, body := h.request(http.MethodPost, "/v1/pastes", fullToken, h.nextKey(), map[string]any{"text": "mcp exact text\r\n끝"})
+	if status != http.StatusCreated {
+		t.Fatalf("create MCP paste status/body = %d/%q", status, body)
+	}
+	var paste identity.PasteResponse
+	if err := json.Unmarshal(body, &paste); err != nil {
+		t.Fatalf("decode MCP paste: %v", err)
+	}
+	server := httptest.NewServer(h.handler)
+	defer server.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "integration-client", Version: "0.1.0"}, nil)
+	transport := &mcp.StreamableClientTransport{
+		Endpoint: server.URL + "/v1/mcp", MaxRetries: -1, DisableStandaloneSSE: true,
+		HTTPClient: &http.Client{Transport: bearerTransport{base: server.Client().Transport, token: connectorToken}},
+	}
+	session, err := client.Connect(context.Background(), transport, nil)
+	if err != nil {
+		t.Fatalf("MCP Connect() error = %v", err)
+	}
+	defer session.Close()
+	tools, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("MCP ListTools() error = %v", err)
+	}
+	if len(tools.Tools) != 1 || tools.Tools[0].Name != "get_latest_paste" {
+		t.Fatalf("MCP tools = %#v", tools.Tools)
+	}
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_latest_paste"})
+	if err != nil || result.IsError || len(result.Content) != 1 {
+		t.Fatalf("MCP text result/error = %#v/%v", result, err)
+	}
+	textContent, ok := result.Content[0].(*mcp.TextContent)
+	if !ok || textContent.Text != "mcp exact text\r\n끝" {
+		t.Fatalf("MCP text content = %#v", result.Content[0])
+	}
+	var accessCount int64
+	if err := h.pool.QueryRow(context.Background(), "select mcp_access_count from pastes where id = $1::uuid", paste.PasteID).Scan(&accessCount); err != nil {
+		t.Fatalf("MCP access count: %v", err)
+	}
+	if accessCount != 1 {
+		t.Fatalf("MCP access count = %d", accessCount)
+	}
+	status, _, _ = h.request(http.MethodGet, "/v1/mcp", fullToken, "", nil)
+	if status != http.StatusForbidden {
+		t.Fatalf("full credential MCP status = %d", status)
+	}
+	status, _, _ = h.request(http.MethodDelete, "/v1/pastes/"+paste.PasteID, fullToken, h.nextKey(), nil)
+	if status != http.StatusNoContent {
+		t.Fatalf("delete MCP paste status = %d", status)
+	}
+	empty, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_latest_paste"})
+	if err != nil || empty.IsError || len(empty.Content) != 0 {
+		t.Fatalf("MCP empty result/error = %#v/%v", empty, err)
+	}
+	metadata, ok := empty.StructuredContent.(map[string]any)
+	if !ok || metadata["available"] != false {
+		t.Fatalf("MCP empty metadata = %#v", empty.StructuredContent)
+	}
+}
+
+type bearerTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t bearerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	clone := request.Clone(request.Context())
+	clone.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(clone)
 }
 
 func TestPairingExpiryIntegration(t *testing.T) {
