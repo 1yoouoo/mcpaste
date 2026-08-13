@@ -13,9 +13,29 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
     }
 
-    func testHTTPStatusMappingDoesNotExposeResponseBody() throws {
-        let error = APIError.http(status: 401)
-        XCTAssertEqual(error, .unauthorized)
-        XCTAssertFalse(String(describing: APIError.http(status: 500)).contains("secret"))
+    func testHTTPStatusMappingDoesNotExposeResponseBody() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [UnauthorizedURLProtocol.self]
+        let client = MCPasteAPI(baseURL: URL(string: "https://example.test")!, token: "token", session: URLSession(configuration: configuration))
+
+        do {
+            _ = try await client.createPaste(text: "secret")
+            XCTFail("Expected unauthorized error")
+        } catch let error as APIError {
+            XCTAssertEqual(error, .unauthorized)
+            XCTAssertFalse(String(describing: error).contains("secret"))
+        }
     }
+}
+
+private final class UnauthorizedURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"error":"secret"}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }
