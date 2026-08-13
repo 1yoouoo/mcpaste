@@ -19,7 +19,8 @@ The host does not have the `go` command. All Go commands below were run in Docke
 - `334aebd` — feat: add stdio mcpaste proxy
 - `6c59ed0` — feat: configure read-only mcpaste clients
 - `35e2176` — fix: bound connector pairing claim
-- final documentation commit — this record, CI/readme/security updates, and migration-test expectations
+- `3006363` — docs: record text mcp phase handoff
+- `6e33792` — fix: validate CI workflow indentation
 
 No push, merge, deployment, tag, or release was performed.
 
@@ -35,6 +36,7 @@ No push, merge, deployment, tag, or release was performed.
 - Native builds: `cmd/server`, `cmd/migrate`, and `cmd/mcpaste` built successfully.
 - Linux connector builds: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` and `GOARCH=arm64` built successfully with `-trimpath`.
 - `docker build -t mcpaste-server:phase3 .`: passed. Image inspection confirmed user `65532:65532` and entrypoint `/mcpaste-server`.
+- Ruby YAML parse of `.github/workflows/ci.yml`: passed after correcting an indentation error found during acceptance.
 - Gitleaks `v8.24.3` container scan: 54 commits scanned, no leaks found. The repository regex secret-pattern check also returned no matches.
 - `git diff --check`: passed at each commit boundary.
 
