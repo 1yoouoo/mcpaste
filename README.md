@@ -133,19 +133,19 @@ set -a
 source .env.local
 set +a
 go run ./cmd/migrate up
-go test ./cmd/migrate ./cmd/server ./db/migrations ./internal/config ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/secure ./internal/testdb
+go test ./cmd/migrate ./cmd/mcpaste ./cmd/server ./db/migrations ./internal/config ./internal/connector ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/mcpserver ./internal/secure ./internal/testdb
 go run ./cmd/server
 ```
 
 The listener check is read-only. If port 55439 is occupied, stop setup and identify the owner; never stop or reconfigure an unrelated process or container. `docker compose up -d --wait --wait-timeout 60 postgres` waits for the defined healthcheck and fails after 60 seconds instead of racing a cold database. On later sessions, run `set -a; source .env.local; set +a`; the bootstrap keeps all existing non-sensitive variables and never replaces an existing `MCPASTE_ENCRYPTION_KEYS` line. Keep every old key ID and key value while the PostgreSQL volume contains encrypted replay rows. For an intentional rotation, add a newly generated key under a new ID, retain all old `id:key` entries in `MCPASTE_ENCRYPTION_KEYS`, and change `MCPASTE_ACTIVE_KEY_ID` to the new ID. Never reuse an old ID with new bytes. If the retained key is lost or a disposable local reset is preferred, run `docker compose down --volumes`, remove `.env.local`, and rerun the bootstrap; the volume deletion is destructive.
 
-`go run ./cmd/migrate status` and `go run ./cmd/migrate verify` must report `applied=1 available=1`. `go run ./cmd/migrate down --steps 1` is destructive local rollback and is never part of application rollback. Stop local PostgreSQL without deleting data with `docker compose down`.
+`go run ./cmd/migrate status` and `go run ./cmd/migrate verify` must report `applied=2 available=2`. `go run ./cmd/migrate down --steps 1` is destructive local rollback and is never part of application rollback. Stop local PostgreSQL without deleting data with `docker compose down`.
 
 Phase 2 exposes anonymous workspace, pairing, recovery, and full-device administration under `/v1/`. Authorization and idempotency values use headers. Pairing claim and recovery values use JSON request bodies. Never put tokens, pairing codes, claim secrets, recovery codes, or QR payloads in a URL, command history, log, screenshot, issue, or pull request.
 
 Phase 3 exposes text synchronization under the same versioned API. Full credentials may create, revise, tombstone, list, and sync text pastes; connector credentials are rejected on every write and sync route. `GET /v1/sync?after=<sequence>&limit=<n>` returns ordered durable events and a cursor, while `GET /v1/events?after=<sequence>` sends metadata-only SSE invalidations. Clients should poll `/v1/sync` every 15 seconds when SSE is unavailable. Text bodies are preserved exactly, encrypted at rest, retained for one year, and removed by the cleanup worker after expiry.
 
-The read-only MCP endpoint and local `mcpaste` STDIO connector are the next Phase 3 integration boundary; they must use a separate connector credential and never expose write APIs or paste bodies in logs.
+The read-only MCP endpoint exposes only `get_latest_paste`. Run `mcpaste setup --endpoint https://host --name linux-companion` after an administrator approves the printed pairing request; setup stores the connector credential in `$XDG_CONFIG_HOME/mcpaste/credential.json` (or `~/.config/mcpaste/credential.json`) and updates detected Codex and Claude Code configurations without placing the token in either file. With no arguments, `mcpaste` runs the read-only STDIO proxy. The connector never exposes write APIs or paste bodies in logs.
 
 Never use real secrets in environment files, fixtures, logs, screenshots, issues, or pull requests. Use visibly fake deterministic examples such as `example-token-not-real`.
 

@@ -61,18 +61,20 @@ jobs:
         run: test -z "$(find cmd internal db -type f -name '*.go' -exec gofmt -l {} +)"
 
       - name: Vet
-        run: GOFLAGS=-mod=readonly go vet ./cmd/migrate ./cmd/server ./db/migrations ./internal/config ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/secure ./internal/testdb
+        run: GOFLAGS=-mod=readonly go vet ./cmd/migrate ./cmd/mcpaste ./cmd/server ./db/migrations ./internal/config ./internal/connector ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/mcpserver ./internal/secure ./internal/testdb
 
       - name: Test with race detector and PostgreSQL
-        run: GOFLAGS=-mod=readonly go test -race -coverprofile=coverage.out ./cmd/migrate ./cmd/server ./db/migrations ./internal/config ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/secure ./internal/testdb
+        run: GOFLAGS=-mod=readonly go test -race -coverprofile=coverage.out ./cmd/migrate ./cmd/mcpaste ./cmd/server ./db/migrations ./internal/config ./internal/connector ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/mcpserver ./internal/secure ./internal/testdb
 
       - name: Build server and migration command
         run: |
           GOFLAGS=-mod=readonly go build -o /tmp/mcpaste-server ./cmd/server
           GOFLAGS=-mod=readonly go build -o /tmp/mcpaste-migrate ./cmd/migrate
+          GOFLAGS=-mod=readonly CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/mcpaste-linux-amd64 ./cmd/mcpaste
+          GOFLAGS=-mod=readonly CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/mcpaste-linux-arm64 ./cmd/mcpaste
 
       - name: Check known Go vulnerabilities
-        run: GOFLAGS=-mod=readonly go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./cmd/migrate ./cmd/server ./db/migrations ./internal/config ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/secure ./internal/testdb
+		run: GOFLAGS=-mod=readonly go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./cmd/migrate ./cmd/mcpaste ./cmd/server ./db/migrations ./internal/config ./internal/connector ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/mcpserver ./internal/secure ./internal/testdb
 
   container:
     name: Container build

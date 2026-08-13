@@ -129,6 +129,14 @@ set +a
 
 The file remains mode 0600 and ignored. Later sessions source it instead of generating another key. Never replace key bytes under a retained key ID while the PostgreSQL volume exists: intentionally rotate by adding a new ID/key pair, retaining every old pair needed by ciphertext, and selecting only the new ID for writes. If local encrypted data is disposable, `docker compose down --volumes` plus removal and recreation of `.env.local` resets both sides together. Do not paste a key value into `.env.example`, documentation, tests, shell transcripts, or review comments. Production keys come only from the root-owned server environment file described below.
 
+## Phase 3 text and connector boundary
+
+Text paste bodies are encrypted with the server keyring before PostgreSQL persistence. Each immutable revision has a fresh AES-GCM nonce, a one-year expiry, and a workspace-local sequence. Tombstones contain no ciphertext. The cleanup worker purges expired revision rows and orphan paste metadata; full-device sync may return text, but metadata-only SSE never does.
+
+Connector credentials are separate read-only bearer credentials. They may authenticate to `/v1/mcp` and invoke only `get_latest_paste`; server authorization rejects them on paste mutations, history, sync, events, and device-management APIs. The MCP tool returns exact text in memory and returns a structured empty result when no valid paste exists. It never searches history or exposes deleted content.
+
+On Linux, `mcpaste` stores the connector endpoint and token in a user-owned credential file under `$XDG_CONFIG_HOME/mcpaste/credential.json` or `~/.config/mcpaste/credential.json`, with directory mode `0700` and file mode `0600`. Setup writes client configuration atomically and includes only the absolute command path and MCP endpoint; the bearer token is never written to Codex/Claude configuration, a URL, shell argument, log, or stderr. The local process exposes only the same read tool over STDIO.
+
 ## Pre-commit check
 
 Inspect what is staged and run a lightweight secret-pattern check:
