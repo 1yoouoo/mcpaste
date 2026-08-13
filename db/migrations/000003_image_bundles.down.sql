@@ -1,3 +1,5 @@
+-- Local/operator rollback only. This down migration is intentionally unsafe after
+-- image revisions have been written because it removes their metadata first.
 drop table paste_assets;
 alter table paste_revisions drop constraint paste_revisions_workspace_id_unique;
 alter table paste_revisions drop constraint paste_revisions_body_fields;

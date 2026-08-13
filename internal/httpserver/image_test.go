@@ -3,6 +3,7 @@ package httpserver
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -42,13 +43,14 @@ func TestImageUploadRequiresFullScopeAndParsesNormalizedMetadata(t *testing.T) {
 	header := make(textproto.MIMEHeader)
 	header.Set("Content-Disposition", `form-data; name="images"; filename="normalized.png"`)
 	header.Set("Content-Type", "image/png")
-	header.Set("X-MCPaste-Width", "2")
-	header.Set("X-MCPaste-Height", "3")
+	header.Set("X-MCPaste-Width", "1")
+	header.Set("X-MCPaste-Height", "1")
 	part, err := writer.CreatePart(header)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = part.Write([]byte("normalized"))
+	fixture, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+	_, _ = part.Write(fixture)
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}

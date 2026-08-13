@@ -45,6 +45,7 @@ type TxStore interface {
 	AppendImageRevision(context.Context, string, string, string, string, []ImageAsset, time.Time, time.Time) (TextRevision, error)
 	ListImageAssets(context.Context, string, string, string) ([]ImageAsset, error)
 	ListPastes(context.Context, string, time.Time, time.Time) ([]TextRevision, error)
+	Snapshot(context.Context, string, time.Time) (SnapshotResult, error)
 	Sync(context.Context, string, int64, int, time.Time) (SyncResult, error)
 	LatestPaste(context.Context, string, time.Time) (LatestPaste, error)
 	TouchPaste(context.Context, string, string, time.Time) error

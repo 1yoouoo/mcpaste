@@ -28,6 +28,9 @@ func (s *Service) CreatePaste(ctx context.Context, principal Principal, idempote
 			if err := tx.InsertPaste(ctx, principal.WorkspaceID, pasteID, now); err != nil {
 				return nil, "", err
 			}
+			if err := tx.SetPasteKind(ctx, principal.WorkspaceID, pasteID, "text"); err != nil {
+				return nil, "", err
+			}
 			expiresAt := now.AddDate(1, 0, 0)
 			envelope, err := s.keyring.Encrypt("paste-text", textObjectID(principal.WorkspaceID, pasteID, revisionID), []byte(input.Text))
 			if err != nil {
@@ -55,6 +58,9 @@ func (s *Service) UpdatePaste(ctx context.Context, principal Principal, pasteID,
 	canonical, _ := json.Marshal(input)
 	return s.mutate(ctx, principal.WorkspaceID, "paste.update:"+pasteID, idempotencyKey, principal.WorkspaceID, canonical, 200,
 		func(tx TxStore, now time.Time) (any, string, error) {
+			if err := tx.SetPasteKind(ctx, principal.WorkspaceID, pasteID, "text"); err != nil {
+				return nil, "", err
+			}
 			expiresAt := now.AddDate(1, 0, 0)
 			envelope, err := s.keyring.Encrypt("paste-text", textObjectID(principal.WorkspaceID, pasteID, revisionID), []byte(input.Text))
 			if err != nil {

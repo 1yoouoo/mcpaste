@@ -53,16 +53,8 @@ func (s *Service) mutateImage(ctx context.Context, principal Principal, pasteID,
 		status = 200
 		eventType = "paste.revised"
 	}
-	return s.mutate(ctx, principal.WorkspaceID, operation, idempotencyKey, principal.WorkspaceID, canonical, status, func(tx TxStore, now time.Time) (any, string, error) {
-		stored := make([]images.StoredAsset, 0, len(input.Assets))
-		committed := false
-		defer func() {
-			if !committed {
-				for _, asset := range stored {
-					_ = s.imageStore.Remove(asset)
-				}
-			}
-		}()
+	stored := make([]images.StoredAsset, 0, len(input.Assets))
+	result, mutateErr := s.mutate(ctx, principal.WorkspaceID, operation, idempotencyKey, principal.WorkspaceID, canonical, status, func(tx TxStore, now time.Time) (any, string, error) {
 		if eventType == "paste.created" {
 			if err := tx.InsertPaste(ctx, principal.WorkspaceID, pasteID, now); err != nil {
 				return nil, "", err
@@ -85,9 +77,14 @@ func (s *Service) mutateImage(ctx context.Context, principal Principal, pasteID,
 		if err != nil {
 			return nil, "", err
 		}
-		committed = true
 		return imageResponse(revision), principal.WorkspaceID, nil
 	})
+	if mutateErr != nil {
+		for _, asset := range stored {
+			_ = s.imageStore.Remove(asset)
+		}
+	}
+	return result, mutateErr
 }
 
 func (s *Service) ImageAsset(ctx context.Context, principal Principal, pasteID string, index int) (ImageAsset, []byte, error) {

@@ -40,8 +40,9 @@ join paste_revisions r on r.workspace_id = e.workspace_id and r.server_sequence 
 where e.workspace_id = $1::uuid
   and e.sequence > $2
   and e.event_type in ('paste.created', 'paste.revised', 'paste.deleted')
+  and (r.revision_kind <> 'image_bundle' or r.expires_at > $4)
 order by e.sequence
-limit $3`, workspaceID, after, limit+1)
+limit $3`, workspaceID, after, limit+1, now)
 	if err != nil {
 		return identity.SyncResult{}, err
 	}

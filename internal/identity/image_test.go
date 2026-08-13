@@ -3,6 +3,7 @@ package identity_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 	"time"
@@ -46,7 +47,8 @@ func TestImageBundlePersistsEncryptedAssetsAndMCPReadsLatest(t *testing.T) {
 	}
 	service.SetImageStore(fileStore)
 	principal := identity.Principal{WorkspaceID: workspaceID, DeviceID: deviceID, Scope: "full"}
-	created, err := service.CreateImagePaste(ctx, principal, "00000000-0000-4000-8000-000000000703", identity.CreateImagePasteInput{Assets: []images.AssetInput{{MIMEType: "image/png", Width: 2, Height: 2, Bytes: []byte("normalized png")}}})
+	fixture, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+	created, err := service.CreateImagePaste(ctx, principal, "00000000-0000-4000-8000-000000000703", identity.CreateImagePasteInput{Assets: []images.AssetInput{{MIMEType: "image/png", Width: 1, Height: 1, Bytes: fixture}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,14 +59,17 @@ func TestImageBundlePersistsEncryptedAssetsAndMCPReadsLatest(t *testing.T) {
 	if response.Kind != "image_bundle" || len(response.Assets) != 1 || response.ExpiresAt.Sub(response.CreatedAt) != 24*time.Hour {
 		t.Fatalf("image response = %#v", response)
 	}
+	if _, err := service.UpdatePaste(ctx, principal, response.PasteID, "00000000-0000-4000-8000-000000000705", identity.UpdatePasteInput{Text: "must stay an image paste"}); err != identity.ErrInvalid {
+		t.Fatalf("text update of image paste error = %v", err)
+	}
 	latest, err := service.LatestPaste(ctx, identity.Principal{WorkspaceID: workspaceID, DeviceID: "connector", Scope: "connector"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !latest.Available || len(latest.Images) != 1 || string(latest.Images[0].Bytes) != "normalized png" {
+	if !latest.Available || len(latest.Images) != 1 || !bytes.Equal(latest.Images[0].Bytes, fixture) {
 		t.Fatalf("latest image = %#v", latest)
 	}
-	if _, err := service.CreateImagePaste(ctx, identity.Principal{WorkspaceID: workspaceID, DeviceID: "connector", Scope: "connector"}, "idempotency", identity.CreateImagePasteInput{Assets: []images.AssetInput{{MIMEType: "image/png", Width: 1, Height: 1, Bytes: []byte("x")}}}); err != identity.ErrForbidden {
+	if _, err := service.CreateImagePaste(ctx, identity.Principal{WorkspaceID: workspaceID, DeviceID: "connector", Scope: "connector"}, "00000000-0000-4000-8000-000000000704", identity.CreateImagePasteInput{Assets: []images.AssetInput{{MIMEType: "image/png", Width: 1, Height: 1, Bytes: fixture}}}); err != identity.ErrForbidden {
 		t.Fatalf("connector write error = %v", err)
 	}
 }

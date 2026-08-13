@@ -9,20 +9,27 @@ public struct PasteRecord: Codable, Equatable, Identifiable {
     public let id: String
     public let revisionID: String
     public let sequence: Int64
+    public let kind: String
     public let text: String?
     public let deleted: Bool
     public let expiresAt: Date
-    public init(id: String, revisionID: String, sequence: Int64, text: String?, deleted: Bool, expiresAt: Date) {
-        self.id = id; self.revisionID = revisionID; self.sequence = sequence
+    public init(id: String, revisionID: String, sequence: Int64, kind: String = "content", text: String?, deleted: Bool, expiresAt: Date) {
+        self.id = id; self.revisionID = revisionID; self.sequence = sequence; self.kind = kind
         self.text = text; self.deleted = deleted; self.expiresAt = expiresAt
     }
-    enum CodingKeys: String, CodingKey { case id = "paste_id", revisionID = "revision_id", sequence = "server_sequence", text, deleted, expiresAt = "expires_at" }
+    enum CodingKeys: String, CodingKey { case id = "paste_id", revisionID = "revision_id", sequence = "server_sequence", kind, text, deleted, expiresAt = "expires_at" }
+}
+
+public struct SnapshotPage: Decodable, Equatable {
+    public let cursor: Int64
+    public let pastes: [PasteRecord]
+    enum CodingKeys: String, CodingKey { case cursor, pastes }
 }
 
 public enum SyncEventKind: String, Codable {
     case content
     case tombstone
-    case imageBundle
+    case imageBundle = "image_bundle"
 }
 
 public struct SyncEvent: Codable, Equatable {
@@ -36,6 +43,7 @@ public struct SyncEvent: Codable, Equatable {
         self.sequence = sequence; self.pasteID = pasteID; self.revisionID = revisionID
         self.kind = kind; self.text = text; self.deleted = deleted
     }
+    enum CodingKeys: String, CodingKey { case sequence, pasteID = "paste_id", revisionID = "revision_id", kind, text, deleted }
 }
 
 public struct SyncPage: Codable, Equatable {
@@ -45,6 +53,7 @@ public struct SyncPage: Codable, Equatable {
     public init(cursor: Int64, hasMore: Bool, events: [SyncEvent]) {
         self.cursor = cursor; self.hasMore = hasMore; self.events = events
     }
+    enum CodingKeys: String, CodingKey { case cursor, hasMore = "has_more", events }
 }
 
 public struct WorkspaceGrant: Decodable, Equatable {
@@ -91,6 +100,7 @@ public enum APIError: Error, Equatable {
     case forbidden
     case notFound
     case conflict
+    case cursorExpired
     case invalidResponse
     case http(status: Int)
     case transport

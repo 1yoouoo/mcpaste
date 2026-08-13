@@ -53,11 +53,16 @@ func getLatestPaste(service latestPasteService) mcp.ToolHandler {
 		}
 		metadata := map[string]any{
 			"available":       latest.Available,
+			"kind":            "text",
 			"paste_id":        latest.PasteID,
 			"revision_id":     latest.RevisionID,
 			"server_sequence": latest.ServerSequence,
 			"created_at":      latest.CreatedAt,
 			"expires_at":      latest.ExpiresAt,
+		}
+		if len(latest.Images) > 0 {
+			metadata["kind"] = "image_bundle"
+			metadata["assets"] = len(latest.Images)
 		}
 		result := &mcp.CallToolResult{StructuredContent: metadata}
 		if latest.Available {

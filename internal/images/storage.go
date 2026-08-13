@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/1yoouoo/mcpaste/internal/secure"
 )
@@ -28,6 +29,10 @@ func NewFileStore(root string, keyring *secure.Keyring) (*FileStore, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, errors.New("create image data directory")
 	}
+	info, err := os.Lstat(root)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, errors.New("invalid image data directory")
+	}
 	if err := os.Chmod(root, 0o700); err != nil {
 		return nil, errors.New("secure image data directory")
 	}
@@ -48,11 +53,8 @@ func (s *FileStore) Put(workspaceID, pasteID, revisionID string, index int, plai
 	if !isWithin(s.root, path) {
 		return StoredAsset{}, ErrInvalidImage
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return StoredAsset{}, errors.New("create image storage path")
-	}
-	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
-		return StoredAsset{}, errors.New("secure image storage path")
+	if err := s.ensureDirectories(filepath.Dir(path)); err != nil {
+		return StoredAsset{}, err
 	}
 	temporary, err := os.CreateTemp(filepath.Dir(path), ".asset-*")
 	if err != nil {
@@ -81,11 +83,44 @@ func (s *FileStore) Put(workspaceID, pasteID, revisionID string, index int, plai
 	return StoredAsset{StorageKey: key, Envelope: envelope}, nil
 }
 
+func (s *FileStore) ensureDirectories(path string) error {
+	relative, err := filepath.Rel(s.root, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return ErrInvalidImage
+	}
+	current := s.root
+	for _, part := range strings.Split(relative, string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, fs.ErrNotExist) {
+			if err := os.Mkdir(current, 0o700); err != nil {
+				return errors.New("create image storage path")
+			}
+			continue
+		}
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return errors.New("invalid image storage path")
+		}
+		if err := os.Chmod(current, 0o700); err != nil {
+			return errors.New("secure image storage path")
+		}
+	}
+	return nil
+}
+
 func (s *FileStore) Open(asset StoredAsset) ([]byte, error) {
 	if asset.StorageKey == "" || filepath.IsAbs(asset.StorageKey) || !isWithin(s.root, filepath.Join(s.root, asset.StorageKey)) || s.keyring == nil {
 		return nil, ErrInvalidImage
 	}
-	ciphertext, err := os.ReadFile(filepath.Join(s.root, asset.StorageKey))
+	path := filepath.Join(s.root, asset.StorageKey)
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, ErrUnavailable
+	}
+	ciphertext, err := os.ReadFile(path)
 	if err != nil {
 		return nil, ErrUnavailable
 	}

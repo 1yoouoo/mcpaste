@@ -6,10 +6,10 @@ deploy_env="${MCPASTE_DEPLOY_ENV:-/etc/mcpaste/deploy.env}"
 previous_file="${deploy_env}.previous"
 test -r "$compose_file"
 test -r "$previous_file"
-previous="$(head -n 1 "$previous_file")"
-case "$previous" in
-    MCPASTE_IMAGE=*@sha256:*) ;;
-    *) printf '%s\n' 'Previous deployment is not an immutable image.' >&2; exit 1 ;;
+previous_image="$(awk -F= '$1 == "MCPASTE_IMAGE" {print substr($0, index($0, "=") + 1); exit}' "$previous_file")"
+case "$previous_image" in
+	*@sha256:*) ;;
+	*) printf '%s\n' 'Previous deployment is not an immutable image.' >&2; exit 1 ;;
 esac
 install -m 0600 "$previous_file" "$deploy_env"
 docker compose --env-file "$deploy_env" -f "$compose_file" up -d server

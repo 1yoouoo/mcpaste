@@ -4,7 +4,11 @@ public protocol SyncAPI: AnyObject {
     func sync(after: Int64) async throws -> SyncPage
 }
 
-public final class MCPasteAPI: SyncAPI {
+public protocol SnapshotAPI: AnyObject {
+    func snapshot() async throws -> SnapshotPage
+}
+
+public final class MCPasteAPI: SyncAPI, SnapshotAPI {
     public let baseURL: URL
     public let token: String
     private let session: URLSession
@@ -32,11 +36,11 @@ public final class MCPasteAPI: SyncAPI {
     }
 
     public func createWorkspace(deviceName: String) async throws -> WorkspaceGrant {
-        try await send(path: "/v1/workspaces", method: "POST", body: ["device_name": deviceName, "platform": "macos"] as [String: String], idempotencyKey: UUID().uuidString)
+        try await send(path: "/v1/workspaces", method: "POST", body: ["device_name": deviceName, "platform": "macos"] as [String: String], idempotencyKey: UUID().uuidString.lowercased())
     }
 
     public func createPairing(deviceName: String, scope: String = "full") async throws -> PairingRecord {
-        try await send(path: "/v1/pairing-requests", method: "POST", body: ["proposed_name": deviceName, "platform": "macos", "requested_scope": scope] as [String: String], idempotencyKey: UUID().uuidString)
+        try await send(path: "/v1/pairing-requests", method: "POST", body: ["proposed_name": deviceName, "platform": "macos", "requested_scope": scope] as [String: String], idempotencyKey: UUID().uuidString.lowercased())
     }
 
     public func claimPairing(pairingID: String, claimSecret: String) async throws -> WorkspaceGrant {
@@ -45,19 +49,27 @@ public final class MCPasteAPI: SyncAPI {
         do { return try decoder.decode(WorkspaceGrant.self, from: data) } catch { throw APIError.invalidResponse }
     }
 
-    public func createPaste(text: String, idempotencyKey: String = UUID().uuidString) async throws -> PasteRecord {
+    public func recoverWorkspace(recoveryCode: String, deviceName: String) async throws -> WorkspaceGrant {
+        try await send(path: "/v1/recoveries", method: "POST", body: [
+            "recovery_code": recoveryCode,
+            "device_name": deviceName,
+            "platform": "macos"
+        ] as [String: String], idempotencyKey: UUID().uuidString.lowercased())
+    }
+
+    public func createPaste(text: String, idempotencyKey: String = UUID().uuidString.lowercased()) async throws -> PasteRecord {
         try await send(path: "/v1/pastes", method: "POST", body: CreatePasteRequest(text: text), idempotencyKey: idempotencyKey)
     }
 
-    public func updatePaste(id: String, text: String, idempotencyKey: String = UUID().uuidString) async throws -> PasteRecord {
+    public func updatePaste(id: String, text: String, idempotencyKey: String = UUID().uuidString.lowercased()) async throws -> PasteRecord {
         try await send(path: "/v1/pastes/\(id)", method: "PATCH", body: CreatePasteRequest(text: text), idempotencyKey: idempotencyKey)
     }
 
-    public func deletePaste(id: String, idempotencyKey: String = UUID().uuidString) async throws {
+    public func deletePaste(id: String, idempotencyKey: String = UUID().uuidString.lowercased()) async throws {
         _ = try await sendVoid(path: "/v1/pastes/\(id)", method: "DELETE", idempotencyKey: idempotencyKey)
     }
 
-    public func uploadImages(_ images: [NormalizedImage], idempotencyKey: String = UUID().uuidString) async throws -> PasteRecord {
+    public func uploadImages(_ images: [NormalizedImage], idempotencyKey: String = UUID().uuidString.lowercased()) async throws -> PasteRecord {
         guard !images.isEmpty else { throw APIError.invalidResponse }
         let boundary = "MCPaste-\(UUID().uuidString)"
         var body = Data()
@@ -85,13 +97,15 @@ public final class MCPasteAPI: SyncAPI {
 
     public func sync(after: Int64) async throws -> SyncPage { try await send(path: "/v1/sync?after=\(after)") }
 
+    public func snapshot() async throws -> SnapshotPage { try await send(path: "/v1/snapshot") }
+
     public func listDevices() async throws -> [DeviceRecord] { let response: DeviceListResponse = try await send(path: "/v1/devices"); return response.devices }
 
-    public func renameDevice(id: String, displayName: String, idempotencyKey: String = UUID().uuidString) async throws -> DeviceRecord {
+    public func renameDevice(id: String, displayName: String, idempotencyKey: String = UUID().uuidString.lowercased()) async throws -> DeviceRecord {
         try await send(path: "/v1/devices/\(id)", method: "PATCH", body: ["display_name": displayName] as [String: String], idempotencyKey: idempotencyKey)
     }
 
-    public func revokeDevice(id: String, idempotencyKey: String = UUID().uuidString) async throws {
+    public func revokeDevice(id: String, idempotencyKey: String = UUID().uuidString.lowercased()) async throws {
         _ = try await sendVoid(path: "/v1/devices/\(id)", method: "DELETE", idempotencyKey: idempotencyKey)
     }
 
@@ -121,6 +135,7 @@ public final class MCPasteAPI: SyncAPI {
             case 403: throw APIError.forbidden
             case 404: throw APIError.notFound
             case 409: throw APIError.conflict
+            case 410: throw APIError.cursorExpired
             default: throw APIError.http(status: http.statusCode)
             }
         } catch let error as APIError { throw error } catch { throw APIError.transport }

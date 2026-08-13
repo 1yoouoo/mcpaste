@@ -5,9 +5,10 @@ public struct KeychainCredential: Codable, Equatable {
     public let workspaceID: String
     public let deviceID: String
     public let scope: String
+    public let endpoint: String?
     public let token: String
-    public init(workspaceID: String, deviceID: String, scope: String = "full", token: String) {
-        self.workspaceID = workspaceID; self.deviceID = deviceID; self.scope = scope; self.token = token
+    public init(workspaceID: String, deviceID: String, scope: String = "full", endpoint: String? = nil, token: String) {
+        self.workspaceID = workspaceID; self.deviceID = deviceID; self.scope = scope; self.endpoint = endpoint; self.token = token
     }
 }
 
@@ -33,6 +34,17 @@ public final class KeychainStore {
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = result as? Data else { throw KeychainError.operation }
         do { return try JSONDecoder().decode(KeychainCredential.self, from: data) } catch { throw KeychainError.operation }
+    }
+
+    public func loadAll() throws -> [KeychainCredential] {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitAll]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess, let values = result as? [Data] else { throw KeychainError.operation }
+        return try values.map { data in
+            do { return try JSONDecoder().decode(KeychainCredential.self, from: data) } catch { throw KeychainError.operation }
+        }
     }
 
     public func remove(workspaceID: String, deviceID: String, scope: String = "full") throws {

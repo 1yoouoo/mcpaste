@@ -46,6 +46,16 @@ public final class SQLiteCache {
     public func setCursor(_ cursor: Int64) throws { try setMetadata("cursor", value: String(cursor)) }
     public func cursor() throws -> Int64 { Int64(try metadata("cursor") ?? "0") ?? 0 }
 
+    public func allPastes() throws -> [CachedPaste] {
+        var result: [CachedPaste] = []
+        try withStatement("SELECT paste_id,revision_id,sequence,text,deleted,expires_at FROM paste_revisions ORDER BY sequence DESC;") { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                result.append(CachedPaste(id: string(statement, 0), revisionID: string(statement, 1), sequence: sqlite3_column_int64(statement, 2), text: optionalString(statement, 3), deleted: sqlite3_column_int(statement, 4) != 0, expiresAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 5))))
+            }
+        }
+        return result
+    }
+
     func enqueue(kind: MutationKind, pasteID: String, body: Data) throws -> PendingMutation {
         let key = UUID().uuidString
         try withStatement("INSERT INTO offline_mutations(kind,paste_id,body,idempotency_key,created_at) VALUES(?,?,?,?,?);") { statement in
@@ -69,6 +79,10 @@ public final class SQLiteCache {
         try withStatement("UPDATE offline_mutations SET attempts=attempts+1 WHERE id=?;") { statement in sqlite3_bind_int64(statement, 1, Int64(id)); try step(statement) }
         guard let item = try pending().first(where: { $0.id == id }) else { throw SQLiteError.query }
         return item
+    }
+
+    func remove(_ id: Int) throws {
+        try withStatement("DELETE FROM offline_mutations WHERE id=?;") { statement in sqlite3_bind_int64(statement, 1, Int64(id)); try step(statement) }
     }
 
     private func setMetadata(_ key: String, value: String) throws { try withStatement("INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value;") { statement in bind(key, at: 1, in: statement); bind(value, at: 2, in: statement); try step(statement) } }

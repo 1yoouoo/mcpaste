@@ -199,8 +199,8 @@ type SyncResult struct {
 }
 
 type SnapshotResult struct {
-	Cursor int64
-	Pastes []LatestPaste
+	Cursor    int64
+	Revisions []TextRevision
 }
 
 var ErrCursorExpired = errors.New("sync cursor expired")

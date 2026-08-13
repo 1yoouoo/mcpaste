@@ -27,11 +27,26 @@ func (s *txStore) SetPasteKind(ctx context.Context, workspaceID, pasteID, kind s
 	if kind != "text" && kind != "image_bundle" {
 		return identity.ErrInvalid
 	}
-	command, err := s.tx.Exec(ctx, `update pastes set paste_kind = $3 where workspace_id = $1::uuid and id = $2::uuid`, workspaceID, pasteID, kind)
+	command, err := s.tx.Exec(ctx, `
+update pastes
+set paste_kind = $3
+where workspace_id = $1::uuid
+  and id = $2::uuid
+  and (paste_kind = $3 or not exists (
+      select 1 from paste_revisions
+      where workspace_id = $1::uuid and paste_id = $2::uuid
+  ))`, workspaceID, pasteID, kind)
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() != 1 {
+		var exists bool
+		if err := s.tx.QueryRow(ctx, `select exists(select 1 from pastes where workspace_id = $1::uuid and id = $2::uuid)`, workspaceID, pasteID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			return identity.ErrInvalid
+		}
 		return identity.ErrNotFound
 	}
 	return nil
@@ -39,14 +54,16 @@ func (s *txStore) SetPasteKind(ctx context.Context, workspaceID, pasteID, kind s
 
 func (s *txStore) AppendTextRevision(ctx context.Context, workspaceID, pasteID, revisionID, kind, eventType string, envelope secure.Envelope, createdAt, expiresAt time.Time) (identity.TextRevision, error) {
 	var exists bool
+	var pasteKind string
 	if err := s.tx.QueryRow(ctx, `
-select exists(
-    select 1 from pastes where workspace_id = $1::uuid and id = $2::uuid
-)`, workspaceID, pasteID).Scan(&exists); err != nil {
+	select exists(select 1 from pastes where workspace_id = $1::uuid and id = $2::uuid), coalesce((select paste_kind from pastes where workspace_id = $1::uuid and id = $2::uuid), '')`, workspaceID, pasteID).Scan(&exists, &pasteKind); err != nil {
 		return identity.TextRevision{}, err
 	}
 	if !exists {
 		return identity.TextRevision{}, identity.ErrNotFound
+	}
+	if kind == "content" && pasteKind == "image_bundle" {
+		return identity.TextRevision{}, identity.ErrInvalid
 	}
 	var sequence int64
 	if err := s.tx.QueryRow(ctx, `
@@ -95,6 +112,14 @@ func (s *txStore) AppendImageRevision(ctx context.Context, workspaceID, pasteID,
 		return identity.TextRevision{}, err
 	}
 	if !exists || len(assets) == 0 {
+		return identity.TextRevision{}, identity.ErrNotFound
+	}
+	var latestKind *string
+	latestErr := s.tx.QueryRow(ctx, `select revision_kind from paste_revisions where workspace_id=$1::uuid and paste_id=$2::uuid order by server_sequence desc limit 1`, workspaceID, pasteID).Scan(&latestKind)
+	if latestErr != nil && !errors.Is(latestErr, pgx.ErrNoRows) {
+		return identity.TextRevision{}, latestErr
+	}
+	if latestErr == nil && latestKind != nil && *latestKind == "tombstone" {
 		return identity.TextRevision{}, identity.ErrNotFound
 	}
 	if eventType != "paste.created" && eventType != "paste.revised" {
@@ -161,6 +186,18 @@ order by latest.server_sequence desc`, workspaceID, cutoff, now)
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (s *txStore) Snapshot(ctx context.Context, workspaceID string, now time.Time) (identity.SnapshotResult, error) {
+	var cursor int64
+	if err := s.tx.QueryRow(ctx, `select next_event_sequence from workspaces where id=$1::uuid`, workspaceID).Scan(&cursor); err != nil {
+		return identity.SnapshotResult{}, err
+	}
+	revisions, err := s.ListPastes(ctx, workspaceID, time.Unix(0, 0).UTC(), now)
+	if err != nil {
+		return identity.SnapshotResult{}, err
+	}
+	return identity.SnapshotResult{Cursor: cursor, Revisions: revisions}, nil
 }
 
 func (s *txStore) LatestPaste(ctx context.Context, workspaceID string, now time.Time) (identity.LatestPaste, error) {

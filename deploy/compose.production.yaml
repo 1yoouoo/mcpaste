@@ -26,6 +26,9 @@ services:
   server:
     image: ${MCPASTE_IMAGE:?MCPASTE_IMAGE must be an immutable image digest}
     restart: unless-stopped
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
     env_file:
       - ${MCPASTE_SERVER_ENV_FILE:-/etc/mcpaste/server.env}
     environment:
@@ -44,6 +47,16 @@ services:
       timeout: 3s
       retries: 6
       start_period: 10s
+
+  data-init:
+    image: golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2
+    user: "0:0"
+    command: ["sh", "-ec", "mkdir -p /var/lib/mcpaste/data && chown 65532:65532 /var/lib/mcpaste/data && chmod 0700 /var/lib/mcpaste/data"]
+    volumes:
+      - mcpaste-data:/var/lib/mcpaste/data
+    networks:
+      - private
+    restart: "no"
 
   postgres:
     image: postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15

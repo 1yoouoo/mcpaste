@@ -15,7 +15,7 @@ if [[ ! -f /etc/mcpaste/server.env ]]; then
 fi
 chown root:root /etc/mcpaste/server.env
 chmod 0600 /etc/mcpaste/server.env
-install -d -o root -g root -m 0700 /var/lib/mcpaste
+install -d -o root -g root -m 0755 /var/lib/mcpaste
 if command -v ufw >/dev/null 2>&1; then
     ufw allow 80/tcp >/dev/null
     ufw allow 443/tcp >/dev/null

@@ -38,6 +38,7 @@ func NewApplicationHandler(readiness ReadinessFunc, service identityAPI, proxies
 	mux.HandleFunc("DELETE /v1/pastes/{paste_id}", server.deletePaste)
 	mux.HandleFunc("GET /v1/pastes", server.listPastes)
 	mux.HandleFunc("GET /v1/sync", server.sync)
+	mux.HandleFunc("GET /v1/snapshot", server.snapshot)
 	mux.HandleFunc("GET /v1/events", server.events)
 	mux.HandleFunc("GET /v1/mcp", server.mcpEndpoint)
 	mux.HandleFunc("POST /v1/mcp", server.mcpEndpoint)
@@ -79,6 +80,8 @@ func v1RouteMethods(path string) ([]string, bool) {
 	case "/v1/image-pastes":
 		return []string{http.MethodPost}, true
 	case "/v1/sync":
+		return []string{http.MethodGet}, true
+	case "/v1/snapshot":
 		return []string{http.MethodGet}, true
 	case "/v1/events":
 		return []string{http.MethodGet}, true

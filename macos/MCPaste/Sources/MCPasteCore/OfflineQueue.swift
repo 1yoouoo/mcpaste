@@ -6,4 +6,5 @@ public final class OfflineMutationQueue {
     public func enqueue(kind: MutationKind, pasteID: String, body: Data) throws -> PendingMutation { try cache.enqueue(kind: kind, pasteID: pasteID, body: body) }
     public func pending() throws -> [PendingMutation] { try cache.pending() }
     public func retry(_ id: Int) throws -> PendingMutation { try cache.retry(id) }
+    public func remove(_ id: Int) throws { try cache.remove(id) }
 }
