@@ -26,7 +26,7 @@ type ParsedCredential struct {
 }
 
 func NewCredential(workspaceID, kind string, random Random) (IssuedCredential, error) {
-	if !validUUID(workspaceID) || (kind != "full" && kind != "connector") {
+	if !ValidUUID(workspaceID) || (kind != "full" && kind != "connector") {
 		return IssuedCredential{}, errors.New("credential metadata is invalid")
 	}
 	locatorBytes, err := randomBytes(random, 16)
@@ -44,7 +44,7 @@ func NewCredential(workspaceID, kind string, random Random) (IssuedCredential, e
 
 func ParseCredential(token string) (ParsedCredential, error) {
 	parts, ok := cutCanonicalSecretFormat(token)
-	if !ok || parts[0] != "mcp1" || !validUUID(parts[1]) {
+	if !ok || parts[0] != "mcp1" || !ValidUUID(parts[1]) {
 		return ParsedCredential{}, errors.New("credential is invalid")
 	}
 	if _, err := decodeCanonicalRawURL(parts[2], 16); err != nil {
@@ -102,7 +102,7 @@ func hashSecret(domain string, secret []byte) []byte {
 	return digest.Sum(nil)
 }
 
-func validUUID(value string) bool {
+func ValidUUID(value string) bool {
 	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
 		return false
 	}

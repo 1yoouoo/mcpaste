@@ -8,6 +8,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+func (s *txStore) LockIdempotency(ctx context.Context, scopeID, operation string, keyHash []byte) error {
+	_, err := s.tx.Exec(ctx, `
+select pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':' || encode($3, 'hex'), 0))`, scopeID, operation, keyHash)
+	return err
+}
+
 func (s *txStore) GetIdempotency(ctx context.Context, scopeID, operation string, keyHash []byte) (identity.IdempotencyRecord, error) {
 	var record identity.IdempotencyRecord
 	var workspaceID *string

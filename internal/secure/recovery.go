@@ -44,7 +44,7 @@ func NewRecoveryWithPermit(ctx context.Context, permit *RecoveryPermit, workspac
 	if permit == nil || permit.state == nil || permit.state.limiter != processArgon2Limiter {
 		return IssuedRecovery{}, errInvalidRecoveryPermit
 	}
-	if !validUUID(workspaceID) {
+	if !ValidUUID(workspaceID) {
 		return IssuedRecovery{}, ErrInvalidRecovery
 	}
 	locatorBytes, err := randomBytes(random, 16)
@@ -122,7 +122,7 @@ type parsedRecoveryCode struct {
 
 func parseRecoveryCode(code string) (parsedRecoveryCode, error) {
 	parts, ok := cutCanonicalSecretFormat(code)
-	if !ok || parts[0] != "mcr1" || !validUUID(parts[1]) {
+	if !ok || parts[0] != "mcr1" || !ValidUUID(parts[1]) {
 		return parsedRecoveryCode{}, ErrInvalidRecovery
 	}
 	if _, err := decodeCanonicalRawURL(parts[2], 16); err != nil {

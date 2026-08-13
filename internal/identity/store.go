@@ -15,6 +15,7 @@ type Store interface {
 }
 
 type TxStore interface {
+	LockIdempotency(context.Context, string, string, []byte) error
 	GetIdempotency(context.Context, string, string, []byte) (IdempotencyRecord, error)
 	DeleteIdempotency(context.Context, string, string, []byte) error
 	PutIdempotency(context.Context, IdempotencyRecord) error

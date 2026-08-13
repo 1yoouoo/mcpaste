@@ -12,16 +12,23 @@ import (
 )
 
 func (s *txStore) InsertPairing(ctx context.Context, pairing identity.Pairing) error {
-	_, err := s.tx.Exec(ctx, `
+	command, err := s.tx.Exec(ctx, `
 insert into pairing_requests(
     id, short_code, claim_hash, proposed_name, platform, requested_scope,
     created_at, expires_at, metadata_purge_at
-) values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9)`,
+) values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9)
+on conflict do nothing`,
 		pairing.ID, pairing.ShortCode, pairing.ClaimHash, pairing.ProposedName,
 		pairing.Platform, pairing.RequestedScope, pairing.CreatedAt,
 		pairing.ExpiresAt, pairing.MetadataPurgeAt,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return identity.ErrInvalid
+	}
+	return nil
 }
 
 func (s *txStore) GetPairingByID(ctx context.Context, workspaceID, pairingID string, now time.Time) (identity.Pairing, error) {
