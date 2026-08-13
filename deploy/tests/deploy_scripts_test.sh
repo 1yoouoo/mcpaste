@@ -17,5 +17,6 @@ migrate_line="$(grep -n 'docker compose.*run --rm --no-deps --entrypoint /mcpast
 if [[ -z "$postgres_line" || -z "$migrate_line" || "$postgres_line" -ge "$migrate_line" ]]; then
     exit 1
 fi
+grep -Eq 'docker compose.*up -d server caddy' "$root/deploy/deploy-image.sh"
 grep -Eq 'mcpaste-postgres:/var/lib/postgresql$' "$root/deploy/compose.production.yaml"
 ! grep -Eq 'mcpaste-postgres:/var/lib/postgresql/data$' "$root/deploy/compose.production.yaml"
