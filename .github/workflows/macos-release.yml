@@ -1,9 +1,18 @@
 name: macOS release
 
 on:
-  push:
-    tags: ['v*']
+  workflow_call:
+    inputs:
+      tag:
+        description: Git tag whose GitHub release receives the macOS artifacts.
+        required: true
+        type: string
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing Git tag whose GitHub release receives the macOS artifacts.
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -17,6 +26,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: ${{ inputs.tag }}
           persist-credentials: false
       - name: Select Xcode
         run: sudo xcode-select --switch /Applications/Xcode_15.4.app
@@ -59,14 +69,14 @@ jobs:
       - name: Publish macOS artifact
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          test -n "$GITHUB_REF_NAME"
-          for attempt in {1..30}; do
-            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-              gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/MCPaste-final.zip" "$RUNNER_TEMP/macOS-SHA256SUMS" "$RUNNER_TEMP/THIRD_PARTY_NOTICES.md"
-              exit 0
-            fi
-            sleep 10
-          done
-          printf '%s\n' 'Linux release was not created before the macOS upload timeout.' >&2
-          exit 1
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) printf '%s\n' 'macOS release requires a v* tag.' >&2; exit 1 ;;
+          esac
+          gh release view "$RELEASE_TAG" >/dev/null
+          gh release upload "$RELEASE_TAG" --clobber \
+            "$RUNNER_TEMP/MCPaste-final.zip" \
+            "$RUNNER_TEMP/macOS-SHA256SUMS" \
+            "$RUNNER_TEMP/THIRD_PARTY_NOTICES.md"

@@ -461,7 +461,7 @@ func (s *Service) Cleanup(ctx context.Context) (CleanupResult, error) {
 	if err != nil {
 		return result, err
 	}
-	expiredImages, err := s.store.ListExpiredImages(ctx, s.clock.Now())
+	expiredImages, err := s.store.ListExpiredImages(ctx, s.clock.Now(), 100)
 	if err != nil {
 		return result, err
 	}
@@ -478,7 +478,7 @@ func (s *Service) Cleanup(ctx context.Context) (CleanupResult, error) {
 			seen[key] = struct{}{}
 		}
 	}
-	result.ImageRevisionRows, result.ImageAssetRows, err = s.store.PurgeImages(ctx, s.clock.Now())
+	result.ImageRevisionRows, result.ImageAssetRows, err = s.store.PurgeImages(ctx, s.clock.Now(), expiredImages)
 	return result, err
 }
 

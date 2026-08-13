@@ -648,6 +648,74 @@ func TestCleanupPurgesExpiredMetadata(t *testing.T) {
 	}
 }
 
+func TestPurgeImagesBoundsFilesystemSelectionAndDatabaseDeletion(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `
+insert into workspaces(id, created_at)
+values ($1::uuid, $2)`, workspaceOne, now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("seed image workspace: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into pastes(id, workspace_id, paste_kind, created_at)
+select ('00000000-0000-4000-8103-' || lpad(n::text, 12, '0'))::uuid,
+       $1::uuid, 'image_bundle', $2::timestamptz - interval '48 hours'
+from generate_series(1, 101) as rows(n)`, workspaceOne, now); err != nil {
+		t.Fatalf("seed image pastes: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into paste_revisions(
+    id, workspace_id, paste_id, server_sequence, revision_kind, created_at, expires_at
+)
+select ('00000000-0000-4000-8104-' || lpad(n::text, 12, '0'))::uuid,
+       $1::uuid,
+       ('00000000-0000-4000-8103-' || lpad(n::text, 12, '0'))::uuid,
+       n, 'image_bundle', $2::timestamptz - interval '48 hours', $2::timestamptz - interval '24 hours'
+from generate_series(1, 101) as rows(n)`, workspaceOne, now); err != nil {
+		t.Fatalf("seed image revisions: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into paste_assets(
+    workspace_id, paste_id, revision_id, asset_index, mime_type, width, height,
+    byte_size, storage_key, image_key_id, image_nonce, created_at, expires_at
+)
+select $1::uuid,
+       ('00000000-0000-4000-8103-' || lpad(n::text, 12, '0'))::uuid,
+       ('00000000-0000-4000-8104-' || lpad(n::text, 12, '0'))::uuid,
+       0, 'image/png', 1, 1, 1,
+       'storage/' || n, 'test-key', decode(repeat('ab', 12), 'hex'),
+       $2::timestamptz - interval '48 hours', $2::timestamptz - interval '24 hours'
+from generate_series(1, 101) as rows(n)`, workspaceOne, now); err != nil {
+		t.Fatalf("seed image assets: %v", err)
+	}
+
+	expired, err := store.ListExpiredImages(ctx, now, 100)
+	if err != nil {
+		t.Fatalf("ListExpiredImages() error = %v", err)
+	}
+	if len(expired) != 100 {
+		t.Fatalf("ListExpiredImages() count = %d, want 100", len(expired))
+	}
+	revisions, assets, err := store.PurgeImages(ctx, now, expired)
+	if err != nil {
+		t.Fatalf("PurgeImages() error = %v", err)
+	}
+	if revisions != 100 || assets != 100 {
+		t.Fatalf("PurgeImages() counts = %d/%d, want 100/100", revisions, assets)
+	}
+	var remainingRevisions, remainingAssets int
+	if err := pool.QueryRow(ctx, `
+select (select count(*) from paste_revisions where revision_kind = 'image_bundle'),
+       (select count(*) from paste_assets)`).Scan(&remainingRevisions, &remainingAssets); err != nil {
+		t.Fatalf("inspect remaining images: %v", err)
+	}
+	if remainingRevisions != 1 || remainingAssets != 1 {
+		t.Fatalf("remaining image rows = %d/%d, want 1/1", remainingRevisions, remainingAssets)
+	}
+}
+
 func TestCleanupBoundsEachMetadataPurge(t *testing.T) {
 	ctx := context.Background()
 	pool := testdb.New(t)

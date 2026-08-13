@@ -2,7 +2,7 @@
 
 MCPaste is a macOS menu bar app that deliberately hands plain text and static images to AI coding tools through MCP.
 
-> Status: local Phase 6 implementation complete; no production deployment or public release has been performed.
+> Status: Phases 1–6 are implemented and deployed to the production MVP. The public macOS release remains gated on the owner's Apple signing/notarization credentials and release-tag action.
 
 ## Product boundary
 

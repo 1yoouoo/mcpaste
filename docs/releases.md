@@ -19,11 +19,13 @@ The macOS release workflow runs Swift tests, archives with Developer ID signing,
 codesign --verify --deep --strict --verbose=2 /Applications/MCPaste.app
 spctl --assess --type execute --verbose=4 /Applications/MCPaste.app
 shasum -a 256 MCPaste-final.zip
-
-The macOS release also publishes `macOS-SHA256SUMS` and `THIRD_PARTY_NOTICES.md`.
 ```
 
+The macOS release also publishes `macOS-SHA256SUMS` and `THIRD_PARTY_NOTICES.md`.
+
 Apple Developer membership, a Developer ID identity, notarization credentials, and the protected release environment are owner prerequisites. They are never stored in this repository.
+
+The Linux tag workflow publishes the GitHub release first and then invokes the reusable macOS workflow with the same `v*` tag. A manual macOS run also requires an existing `v*` tag; it never uploads artifacts to a branch-named release.
 
 ## Release gate
 

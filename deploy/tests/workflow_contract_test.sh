@@ -17,3 +17,8 @@ while IFS= read -r file; do
 done < <(find "$root/.github/workflows" "$root/deploy" -type f ! -name 'server.env.example' -print)
 grep -Eq 'MCPASTE_DEPLOY_KNOWN_HOSTS' "$root/.github/workflows/deploy.yml"
 grep -Eq 'APPLE_NOTARIZATION_APPLE_ID' "$root/.github/workflows/macos-release.yml"
+grep -Eq '^  workflow_call:' "$root/.github/workflows/macos-release.yml"
+grep -Eq '^      tag:' "$root/.github/workflows/macos-release.yml"
+grep -Eq 'gh release upload .*--clobber' "$root/.github/workflows/macos-release.yml"
+grep -Eq '^    needs: linux$' "$root/.github/workflows/release.yml"
+grep -Eq 'uses: \.\/\.github\/workflows\/macos-release\.yml' "$root/.github/workflows/release.yml"

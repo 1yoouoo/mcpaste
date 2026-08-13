@@ -121,10 +121,10 @@ public final class MCPasteAPI: SyncAPI, SnapshotAPI, EventsAPI {
                     for try await line in bytes.lines {
                         if line.hasPrefix("id:") {
                             eventID = Int64(line.dropFirst(3).trimmingCharacters(in: .whitespaces))
-						} else if line.isEmpty, let value = eventID {
+						} else if line.hasPrefix("data:"), let value = eventID {
 							continuation.yield(value)
 							eventID = nil
-                        }
+						}
                     }
                     continuation.finish()
                 } catch is CancellationError {

@@ -317,42 +317,47 @@ where paste.workspace_id = orphan_pastes.workspace_id
 	return revisions, pastes, err
 }
 
-func (s *Store) PurgeImages(ctx context.Context, now time.Time) (int64, int64, error) {
+func (s *Store) PurgeImages(ctx context.Context, now time.Time, expired []identity.ImageAsset) (int64, int64, error) {
+	if len(expired) == 0 {
+		return 0, 0, nil
+	}
+	revisionIDs := make([]string, 0, len(expired))
+	seen := make(map[string]struct{}, len(expired))
+	for _, asset := range expired {
+		if _, ok := seen[asset.RevisionID]; ok {
+			continue
+		}
+		revisionIDs = append(revisionIDs, asset.RevisionID)
+		seen[asset.RevisionID] = struct{}{}
+	}
 	var revisions, assets int64
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, cleanupAdvisoryLockName); err != nil {
 			return err
 		}
 		command, err := tx.Exec(ctx, `
-with expired_assets as (
-    select workspace_id, revision_id, asset_index
-    from paste_assets
-    where expires_at <= $1
-    order by expires_at, workspace_id, revision_id, asset_index
-    for update skip locked
-    limit 100
+with selected_revisions as (
+    select revision_id
+    from unnest($2::uuid[]) as selected(revision_id)
 )
 delete from paste_assets as asset
-using expired_assets
-where asset.workspace_id = expired_assets.workspace_id
-  and asset.revision_id = expired_assets.revision_id
-  and asset.asset_index = expired_assets.asset_index`, now)
+using selected_revisions
+where asset.revision_id = selected_revisions.revision_id
+  and asset.expires_at <= $1`, now, revisionIDs)
 		if err != nil {
 			return err
 		}
 		assets = command.RowsAffected()
 		command, err = tx.Exec(ctx, `
-with expired_revisions as (
-    select id
-    from paste_revisions
-    where expires_at <= $1 and revision_kind = 'image_bundle'
-    order by expires_at, id
-    for update skip locked
-    limit 100
+with selected_revisions as (
+    select revision_id
+    from unnest($2::uuid[]) as selected(revision_id)
 )
 delete from paste_revisions as revision
-using expired_revisions
-where revision.id = expired_revisions.id`, now)
+using selected_revisions
+where revision.id = selected_revisions.revision_id
+  and revision.expires_at <= $1
+  and revision.revision_kind = 'image_bundle'`, now, revisionIDs)
 		if err != nil {
 			return err
 		}
@@ -375,8 +380,28 @@ where paste.workspace_id = orphan_pastes.workspace_id
 	return revisions, assets, err
 }
 
-func (s *Store) ListExpiredImages(ctx context.Context, now time.Time) ([]identity.ImageAsset, error) {
-	rows, err := s.pool.Query(ctx, `select workspace_id::text,paste_id::text,revision_id::text,asset_index,mime_type,width,height,byte_size,expires_at,storage_key,image_key_id,image_nonce from paste_assets where expires_at <= $1 order by workspace_id,paste_id,revision_id,asset_index`, now)
+func (s *Store) ListExpiredImages(ctx context.Context, now time.Time, limit int) ([]identity.ImageAsset, error) {
+	if limit <= 0 {
+		return []identity.ImageAsset{}, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+select workspace_id::text, paste_id::text, revision_id::text, asset_index,
+       mime_type, width, height, byte_size, expires_at, storage_key, image_key_id, image_nonce
+from (
+    select distinct on (asset.revision_id)
+           asset.workspace_id, asset.paste_id, asset.revision_id, asset.asset_index,
+           asset.mime_type, asset.width, asset.height, asset.byte_size, asset.expires_at,
+           asset.storage_key, asset.image_key_id, asset.image_nonce
+    from paste_assets as asset
+    join paste_revisions as revision
+      on revision.workspace_id = asset.workspace_id and revision.id = asset.revision_id
+    where asset.expires_at <= $1
+      and revision.expires_at <= $1
+      and revision.revision_kind = 'image_bundle'
+    order by asset.revision_id, asset.asset_index
+) as expired
+order by expires_at, workspace_id, paste_id, revision_id
+limit $2`, now, limit)
 	if err != nil {
 		return nil, err
 	}

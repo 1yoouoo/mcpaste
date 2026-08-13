@@ -14,8 +14,8 @@ type Store interface {
 	ConsumeRateLimit(context.Context, RateRule, []byte, time.Time) (RateDecision, error)
 	Cleanup(context.Context, time.Time) (CleanupResult, error)
 	PurgeText(context.Context, time.Time) (int64, int64, error)
-	PurgeImages(context.Context, time.Time) (int64, int64, error)
-	ListExpiredImages(context.Context, time.Time) ([]ImageAsset, error)
+	PurgeImages(context.Context, time.Time, []ImageAsset) (int64, int64, error)
+	ListExpiredImages(context.Context, time.Time, int) ([]ImageAsset, error)
 }
 
 type TxStore interface {
