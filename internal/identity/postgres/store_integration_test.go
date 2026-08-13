@@ -80,6 +80,10 @@ func TestAuthenticateRejectsCredentialRevokedBeforeLastUsedUpdate(t *testing.T) 
 		t.Fatalf("begin credential lock: %v", err)
 	}
 	defer func() { _ = lockTx.Rollback(context.Background()) }()
+	var lockBackendPID int
+	if err := lockTx.QueryRow(ctx, "select pg_backend_pid()").Scan(&lockBackendPID); err != nil {
+		t.Fatalf("read credential lock backend PID: %v", err)
+	}
 	if _, err := lockTx.Exec(ctx, `
 select 1 from credentials
 where workspace_id = $1::uuid and token_id = $2
@@ -96,7 +100,7 @@ for update`, workspaceOne, "BBBBBBBBBBBBBBBBBBBBBB"); err != nil {
 		principal, err := store.Authenticate(ctx, workspaceOne, "BBBBBBBBBBBBBBBBBBBBBB", hash, now.Add(time.Minute))
 		result <- authenticationResult{principal: principal, err: err}
 	}()
-	waitForBlockedLastUsedUpdate(t, ctx, pool)
+	waitForBlockedLastUsedUpdate(t, ctx, pool, lockBackendPID)
 
 	if _, err := lockTx.Exec(ctx, `
 update credentials set revoked_at = $3
@@ -116,7 +120,7 @@ where workspace_id = $1::uuid and token_id = $2`, workspaceOne, "BBBBBBBBBBBBBBB
 	}
 }
 
-func waitForBlockedLastUsedUpdate(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+func waitForBlockedLastUsedUpdate(t *testing.T, ctx context.Context, pool *pgxpool.Pool, lockBackendPID int) {
 	t.Helper()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
@@ -125,12 +129,13 @@ func waitForBlockedLastUsedUpdate(t *testing.T, ctx context.Context, pool *pgxpo
 		if err := pool.QueryRow(ctx, `
 select exists(
     select 1
-    from pg_stat_activity
-    where datname = current_database()
-      and pid <> pg_backend_pid()
-      and wait_event_type = 'Lock'
-      and position('update credentials set last_used_at' in query) > 0
-)`).Scan(&waiting); err != nil {
+    from pg_stat_activity waiting_auth
+    where waiting_auth.datname = current_database()
+      and waiting_auth.pid <> pg_backend_pid()
+      and waiting_auth.wait_event_type = 'Lock'
+      and position('update credentials set last_used_at' in waiting_auth.query) > 0
+      and $1::integer = any(pg_blocking_pids(waiting_auth.pid))
+)`, lockBackendPID).Scan(&waiting); err != nil {
 			t.Fatalf("inspect blocked authentication update: %v", err)
 		}
 		if waiting {
@@ -211,6 +216,33 @@ where workspace_id = $1::uuid`, workspaceOne, now); err != nil {
 	})
 	if err != nil {
 		t.Fatalf("Unicode case-fold insertion: %v", err)
+	}
+}
+
+func TestDeviceNameSuffixUsesPostgreSQLLower(t *testing.T) {
+	ctx := context.Background()
+	store := New(testdb.New(t))
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceOne, now); err != nil {
+			return err
+		}
+		first, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: deviceOne, DisplayName: "İ", Platform: "macos", Role: "full", CreatedAt: now,
+		})
+		if err != nil || first.DisplayName != "İ" {
+			t.Fatalf("first device = %#v, %v", first, err)
+		}
+		second, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: "00000000-0000-4000-8000-000000000205", DisplayName: "i", Platform: "macos", Role: "full", CreatedAt: now,
+		})
+		if err != nil || second.DisplayName != "i (2)" {
+			t.Fatalf("second device = %#v, %v", second, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("PostgreSQL lower insertion: %v", err)
 	}
 }
 

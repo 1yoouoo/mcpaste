@@ -19,9 +19,13 @@ func (s *txStore) InsertDevice(ctx context.Context, workspaceID string, device i
 	if _, err := s.tx.Exec(ctx, "select pg_advisory_xact_lock(hashtextextended($1, 0))", workspaceID); err != nil {
 		return identity.Device{}, err
 	}
+	collisions, err := s.loadDeviceDisplayNameCollisions(ctx, workspaceID, "")
+	if err != nil {
+		return identity.Device{}, err
+	}
 	for attempt := 1; attempt <= 9999; attempt++ {
 		candidate := identity.DisplayNameCandidate(device.DisplayName, attempt)
-		exists, err := s.deviceDisplayNameExists(ctx, workspaceID, "", candidate)
+		exists, err := s.deviceDisplayNameCollides(ctx, collisions, candidate)
 		if err != nil {
 			return identity.Device{}, err
 		}
@@ -42,32 +46,53 @@ values ($1::uuid, $2::uuid, $3, $4, $5, $6)`,
 	return identity.Device{}, identity.ErrInvalid
 }
 
-func (s *txStore) deviceDisplayNameExists(ctx context.Context, workspaceID, excludedDeviceID, candidate string) (bool, error) {
+type deviceDisplayNameCollisionSet struct {
+	folded  map[string]struct{}
+	lowered map[string]struct{}
+}
+
+func (s *txStore) loadDeviceDisplayNameCollisions(ctx context.Context, workspaceID, excludedDeviceID string) (deviceDisplayNameCollisionSet, error) {
 	rows, err := s.tx.Query(ctx, `
-select id::text, display_name
+select id::text, display_name, lower(display_name)
 from devices
 where workspace_id = $1::uuid`, workspaceID)
 	if err != nil {
-		return false, err
+		return deviceDisplayNameCollisionSet{}, err
 	}
 	defer rows.Close()
 
 	folder := cases.Fold()
-	foldedCandidate := folder.String(candidate)
+	collisions := deviceDisplayNameCollisionSet{
+		folded:  make(map[string]struct{}),
+		lowered: make(map[string]struct{}),
+	}
 	for rows.Next() {
 		var deviceID string
 		var displayName string
-		if err := rows.Scan(&deviceID, &displayName); err != nil {
-			return false, err
+		var loweredDisplayName string
+		if err := rows.Scan(&deviceID, &displayName, &loweredDisplayName); err != nil {
+			return deviceDisplayNameCollisionSet{}, err
 		}
-		if deviceID != excludedDeviceID && folder.String(displayName) == foldedCandidate {
-			return true, nil
+		if deviceID == excludedDeviceID {
+			continue
 		}
+		collisions.folded[folder.String(displayName)] = struct{}{}
+		collisions.lowered[loweredDisplayName] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
+		return deviceDisplayNameCollisionSet{}, err
+	}
+	return collisions, nil
+}
+
+func (s *txStore) deviceDisplayNameCollides(ctx context.Context, collisions deviceDisplayNameCollisionSet, candidate string) (bool, error) {
+	var loweredCandidate string
+	if err := s.tx.QueryRow(ctx, "select lower($1::text)", candidate).Scan(&loweredCandidate); err != nil {
 		return false, err
 	}
-	return false, nil
+	_, foldedCollision := collisions.folded[cases.Fold().String(candidate)]
+	_, loweredCollision := collisions.lowered[loweredCandidate]
+	return foldedCollision || loweredCollision, nil
 }
 
 func (s *txStore) InsertCredential(ctx context.Context, workspaceID string, record identity.CredentialRecord) error {
