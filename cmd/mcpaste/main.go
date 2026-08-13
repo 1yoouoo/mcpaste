@@ -147,6 +147,12 @@ func runSetup(ctx context.Context, args []string) error {
 }
 
 func claimPairing(ctx context.Context, apiBase string, pairing identity.PairingCreateResponse) (identity.WorkspaceGrant, error) {
+	deadline := time.Now().Add(5 * time.Minute)
+	if !pairing.ExpiresAt.IsZero() && pairing.ExpiresAt.Before(deadline) {
+		deadline = pairing.ExpiresAt
+	}
+	claimContext, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -154,7 +160,7 @@ func claimPairing(ctx context.Context, apiBase string, pairing identity.PairingC
 		if err != nil {
 			return identity.WorkspaceGrant{}, errors.New("claim pairing")
 		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, apiBase+"/v1/pairing-requests/"+pairing.PairingID+"/claim", bytes.NewReader(input))
+		request, err := http.NewRequestWithContext(claimContext, http.MethodPost, apiBase+"/v1/pairing-requests/"+pairing.PairingID+"/claim", bytes.NewReader(input))
 		if err != nil {
 			return identity.WorkspaceGrant{}, errors.New("claim pairing")
 		}
@@ -179,8 +185,8 @@ func claimPairing(ctx context.Context, apiBase string, pairing identity.PairingC
 			return identity.WorkspaceGrant{}, errors.New("claim pairing")
 		}
 		select {
-		case <-ctx.Done():
-			return identity.WorkspaceGrant{}, ctx.Err()
+		case <-claimContext.Done():
+			return identity.WorkspaceGrant{}, claimContext.Err()
 		case <-ticker.C:
 		}
 	}
