@@ -141,12 +141,11 @@ jobs:
 
       - name: Reject obvious secret patterns without disclosure
         run: |
-          if rg --quiet --hidden \
-            --glob '!.git/**' \
-            --glob '!.github/workflows/ci.yml' \
-            --glob '!docs/security-and-secrets.md' \
-            --glob '!docs/superpowers/plans/**' \
-            '(sk-[A-Za-z0-9]{12,}|ghp_[A-Za-z0-9]{12,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' .
+          if git grep --quiet -I -E \
+            '(sk-[A-Za-z0-9]{12,}|ghp_[A-Za-z0-9]{12,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' \
+            -- ':!.github/workflows/ci.yml' \
+            ':!docs/security-and-secrets.md' \
+            ':!docs/superpowers/plans/**'
           then
             printf '%s\n' 'Potential secret pattern detected.' >&2
             exit 1
