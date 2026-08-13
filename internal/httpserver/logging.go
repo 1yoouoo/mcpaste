@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -18,14 +19,23 @@ func NewAccessLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler
 			started := time.Now()
 			response := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 
-			next.ServeHTTP(response, r)
+			defer func() {
+				panicValue := recover()
+				if panicValue != nil {
+					response.status = http.StatusInternalServerError
+				}
+				logger.Info("http request",
+					slog.String("method", r.Method),
+					slog.String("path", safeRoute(r.Pattern)),
+					slog.Int("status", response.status),
+					slog.Int64("duration_ms", time.Since(started).Milliseconds()),
+				)
+				if panicValue != nil {
+					panic(panicValue)
+				}
+			}()
 
-			logger.Info("http request",
-				slog.String("method", r.Method),
-				slog.String("path", safeRoute(r.Pattern)),
-				slog.Int("status", response.status),
-				slog.Int64("duration_ms", time.Since(started).Milliseconds()),
-			)
+			next.ServeHTTP(response, r)
 		})
 	}
 }
@@ -75,10 +85,11 @@ func logRecoveredPanic(logger *slog.Logger, r *http.Request) {
 }
 
 type bufferedResponse struct {
-	header      http.Header
-	body        bytes.Buffer
-	status      int
-	wroteHeader bool
+	header        http.Header
+	body          bytes.Buffer
+	informational []int
+	status        int
+	wroteHeader   bool
 }
 
 func (w *bufferedResponse) Header() http.Header {
@@ -87,6 +98,13 @@ func (w *bufferedResponse) Header() http.Header {
 
 func (w *bufferedResponse) WriteHeader(status int) {
 	if w.wroteHeader {
+		return
+	}
+	if status < 100 || status > 999 {
+		panic(fmt.Sprintf("invalid WriteHeader code %v", status))
+	}
+	if status >= 100 && status <= 199 {
+		w.informational = append(w.informational, status)
 		return
 	}
 	w.status = status
@@ -105,6 +123,9 @@ func (w *bufferedResponse) flush(target http.ResponseWriter) {
 		for _, value := range values {
 			target.Header().Add(name, value)
 		}
+	}
+	for _, status := range w.informational {
+		target.WriteHeader(status)
 	}
 	target.WriteHeader(w.status)
 	_, _ = target.Write(w.body.Bytes())
@@ -132,6 +153,10 @@ func (w *statusWriter) Write(data []byte) (int, error) {
 
 func (w *statusWriter) WriteHeader(status int) {
 	if w.wroteHeader {
+		return
+	}
+	if status >= 100 && status <= 199 {
+		w.ResponseWriter.WriteHeader(status)
 		return
 	}
 	w.status = status
