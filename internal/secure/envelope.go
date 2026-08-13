@@ -4,15 +4,12 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
 )
 
 const nonceSize = 12
-const associatedDataVersion byte = 1
-const associatedDataDomain = "mcpaste-envelope"
 
 type Envelope struct {
 	KeyID      string
@@ -76,6 +73,9 @@ func NewKeyring(active string, keys map[string][]byte, random Random) (*Keyring,
 }
 
 func (k *Keyring) Encrypt(purpose, objectID string, plaintext []byte) (Envelope, error) {
+	if !validPurpose(purpose) {
+		return Envelope{}, errors.New("encryption purpose is invalid")
+	}
 	aead, err := newGCM(k.keys[k.active])
 	if err != nil {
 		return Envelope{}, err
@@ -89,6 +89,9 @@ func (k *Keyring) Encrypt(purpose, objectID string, plaintext []byte) (Envelope,
 }
 
 func (k *Keyring) Decrypt(purpose, objectID string, envelope Envelope) ([]byte, error) {
+	if !validPurpose(purpose) {
+		return nil, errors.New("encrypted envelope is invalid")
+	}
 	key, ok := k.keys[envelope.KeyID]
 	if !ok || len(envelope.Nonce) != nonceSize {
 		return nil, errors.New("encrypted envelope is invalid")
@@ -113,18 +116,11 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 }
 
 func associatedData(keyID, purpose, objectID string) []byte {
-	fields := [...]string{associatedDataDomain, keyID, purpose, objectID}
-	size := 1
-	for _, field := range fields {
-		size += 8 + len(field)
-	}
-	framed := make([]byte, 1, size)
-	framed[0] = associatedDataVersion
-	for _, field := range fields {
-		framed = binary.BigEndian.AppendUint64(framed, uint64(len(field)))
-		framed = append(framed, field...)
-	}
-	return framed
+	return []byte("mcpaste:v1:" + keyID + ":" + purpose + ":" + objectID)
+}
+
+func validPurpose(value string) bool {
+	return value != "" && !strings.Contains(value, ":")
 }
 
 func validKeyID(value string) bool {

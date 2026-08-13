@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -108,6 +109,29 @@ func TestCleanupWorkerStopsOnCancellationBeforePoolClose(t *testing.T) {
 	defer pingCancel()
 	if err := pool.Ping(pingCtx); err != nil {
 		t.Fatalf("pool closed before cleanup worker exited: %v", err)
+	}
+}
+
+func TestStartHTTPServerDoesNotLogBeforeSuccessfulBind(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer occupied.Close()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	serverErrors, err := startHTTPServer(
+		&http.Server{},
+		logger,
+		occupied.Addr().String(),
+		"test",
+	)
+	if err == nil || serverErrors != nil {
+		t.Fatalf("startHTTPServer() bind metadata: nil_error=%v channel=%v", err == nil, serverErrors != nil)
+	}
+	if logs.Len() != 0 {
+		t.Fatal("failed bind emitted a listening log")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -70,12 +71,11 @@ func run() error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	serverErrors, err := startHTTPServer(server, logger, cfg.HTTPAddr, string(cfg.Environment))
+	if err != nil {
+		return err
+	}
 	cleanupDone := startCleanup(ctx, logger, service, cfg.CleanupInterval)
-	serverErrors := make(chan error, 1)
-	go func() {
-		logger.Info("server listening", slog.String("address", cfg.HTTPAddr), slog.String("environment", string(cfg.Environment)))
-		serverErrors <- server.ListenAndServe()
-	}()
 	select {
 	case err := <-serverErrors:
 		stop()
@@ -94,6 +94,19 @@ func run() error {
 }
 
 const serverShutdownTimeout = 10 * time.Second
+
+func startHTTPServer(server *http.Server, logger *slog.Logger, address, environment string) (<-chan error, error) {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	serverErrors := make(chan error, 1)
+	logger.Info("server listening", slog.String("address", listener.Addr().String()), slog.String("environment", environment))
+	go func() {
+		serverErrors <- server.Serve(listener)
+	}()
+	return serverErrors, nil
+}
 
 func shutdownServerWithin(server *http.Server, timeout time.Duration) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)

@@ -77,12 +77,20 @@ func TestEnvelopeAssociatedDataRejectsTupleCollision(t *testing.T) {
 	if err != nil {
 		t.Fatal("NewKeyring failed")
 	}
-	envelope, err := keyring.Encrypt("a:b", "c", []byte("tuple-marker"))
-	if err != nil {
-		t.Fatal("Encrypt failed")
+	if _, err := keyring.Encrypt("a:b", "c", []byte("tuple-marker")); err == nil {
+		t.Fatal("Encrypt accepted a purpose containing the tuple delimiter")
 	}
-	if _, err := keyring.Decrypt("a", "b:c", envelope); err == nil {
-		t.Fatal("colliding purpose and object tuple decrypted")
+}
+
+func TestEnvelopeAssociatedDataMatchesPersistenceContract(t *testing.T) {
+	want := "mcpaste:v1:test-key:pairing-grant:00000000-0000-4000-8000-000000000001"
+	got := string(associatedData(
+		"test-key",
+		"pairing-grant",
+		"00000000-0000-4000-8000-000000000001",
+	))
+	if got != want {
+		t.Fatalf("associated data does not match the persistence contract")
 	}
 }
 
