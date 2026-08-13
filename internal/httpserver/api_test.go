@@ -91,6 +91,53 @@ func TestWorkspaceCreateUsesStrictJSON(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCreateRejectsAmbiguousJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "case mismatched fields", body: `{"DEVICE_NAME":"Mac","PLATFORM":"macos"}`},
+		{name: "invalid UTF-8", body: `{"device_name":"Mac` + string([]byte{0xff}) + `","platform":"macos"}`},
+		{name: "duplicate top-level field", body: `{"device_name":"Mac","device_name":"Other Mac","platform":"macos"}`},
+	}
+	for _, item := range tests {
+		t.Run(item.name, func(t *testing.T) {
+			api := &fakeIdentityAPI{}
+			request := httptest.NewRequest(http.MethodPost, "/v1/workspaces", strings.NewReader(item.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Idempotency-Key", "00000000-0000-4000-8000-000000000907")
+			response := httptest.NewRecorder()
+
+			NewApplicationHandler(nil, api, nil).ServeHTTP(response, request)
+
+			if response.Code != http.StatusBadRequest || response.Body.String() != "{\"error\":{\"code\":\"invalid_request\"}}\n" {
+				t.Fatalf("status/body = %d/%q", response.Code, response.Body.String())
+			}
+			if api.createCalls != 0 {
+				t.Fatalf("createCalls = %d", api.createCalls)
+			}
+		})
+	}
+}
+
+func TestWorkspaceCreateRejectsDuplicateContentType(t *testing.T) {
+	api := &fakeIdentityAPI{}
+	request := httptest.NewRequest(http.MethodPost, "/v1/workspaces", strings.NewReader(`{"device_name":"Mac","platform":"macos"}`))
+	request.Header.Add("Content-Type", "application/json")
+	request.Header.Add("Content-Type", "text/plain")
+	request.Header.Set("Idempotency-Key", "00000000-0000-4000-8000-000000000908")
+	response := httptest.NewRecorder()
+
+	NewApplicationHandler(nil, api, nil).ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest || response.Body.String() != "{\"error\":{\"code\":\"invalid_request\"}}\n" {
+		t.Fatalf("status/body = %d/%q", response.Code, response.Body.String())
+	}
+	if api.createCalls != 0 {
+		t.Fatalf("createCalls = %d", api.createCalls)
+	}
+}
+
 func TestConnectorCannotListDevices(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/v1/devices", nil)
 	request.Header.Set("Authorization", "Bearer connector-runtime-marker")
