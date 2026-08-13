@@ -57,16 +57,77 @@ unset listener_output listener_status
 docker compose up -d --wait --wait-timeout 60 postgres
 if [ ! -f .env.local ]; then
   umask 077
-  cp .env.example .env.local
+  if ! cp .env.example .env.local; then
+    printf '%s\n' 'Unable to initialize the local environment.' >&2
+    exit 1
+  fi
 fi
-chmod 600 .env.local
+if ! chmod 600 .env.local; then
+  printf '%s\n' 'Unable to secure the local environment.' >&2
+  exit 1
+fi
 set -a
 source .env.local
 set +a
-if ! grep -q '^MCPASTE_ENCRYPTION_KEYS=' .env.local; then
-  mcpaste_local_key="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
-  printf '\nMCPASTE_ENCRYPTION_KEYS=%s:%s\n' "$MCPASTE_ACTIVE_KEY_ID" "$mcpaste_local_key" >>.env.local
-  unset mcpaste_local_key
+if ! (
+  set -u
+  mcpaste_env_tmp=''
+  mcpaste_key_raw=''
+  mcpaste_local_key=''
+  mcpaste_bootstrap_cleanup() {
+    mcpaste_bootstrap_status=$?
+    trap - EXIT HUP INT TERM
+    if [ -n "$mcpaste_env_tmp" ]; then
+      rm -f "$mcpaste_env_tmp"
+    fi
+    unset mcpaste_env_tmp mcpaste_key_raw mcpaste_local_key
+    exit "$mcpaste_bootstrap_status"
+  }
+  trap mcpaste_bootstrap_cleanup EXIT
+  trap 'exit 1' HUP INT TERM
+
+  mcpaste_key_status=0
+  grep -q '^MCPASTE_ENCRYPTION_KEYS=' .env.local || mcpaste_key_status=$?
+  case "$mcpaste_key_status" in
+    0) exit 0 ;;
+    1) ;;
+    *) exit 1 ;;
+  esac
+  if ! mcpaste_key_raw="$(openssl rand -base64 32)"; then
+    exit 1
+  fi
+  if ! mcpaste_local_key="$(printf '%s' "$mcpaste_key_raw" | tr '+/' '-_')"; then
+    exit 1
+  fi
+  mcpaste_local_key="${mcpaste_local_key%=}"
+  if [ "${#mcpaste_local_key}" -ne 43 ]; then
+    exit 1
+  fi
+  case "$mcpaste_local_key" in
+    *[!A-Za-z0-9_-]*) exit 1 ;;
+  esac
+  if ! mcpaste_env_tmp="$(mktemp ./.env.local.tmp.XXXXXX)"; then
+    exit 1
+  fi
+  if ! chmod 600 "$mcpaste_env_tmp"; then
+    exit 1
+  fi
+  if ! cp .env.local "$mcpaste_env_tmp"; then
+    exit 1
+  fi
+  if ! chmod 600 "$mcpaste_env_tmp"; then
+    exit 1
+  fi
+  if ! printf '\nMCPASTE_ENCRYPTION_KEYS=%s:%s\n' "$MCPASTE_ACTIVE_KEY_ID" "$mcpaste_local_key" >>"$mcpaste_env_tmp"; then
+    exit 1
+  fi
+  if ! mv -f "$mcpaste_env_tmp" .env.local; then
+    exit 1
+  fi
+  mcpaste_env_tmp=''
+); then
+  printf '%s\n' 'Unable to initialize the local encryption keyring.' >&2
+  exit 1
 fi
 set -a
 source .env.local

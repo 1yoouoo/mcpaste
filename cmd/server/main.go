@@ -37,12 +37,13 @@ func run() error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	pool, err := database.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
+		stop()
 		return err
 	}
 	defer pool.Close()
+	defer stop()
 	available, err := migrate.Load(migrations.Files)
 	if err != nil {
 		return errors.New("load schema migrations")
@@ -69,7 +70,7 @@ func run() error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	go runCleanup(ctx, logger, service, cfg.CleanupInterval)
+	cleanupDone := startCleanup(ctx, logger, service, cfg.CleanupInterval)
 	serverErrors := make(chan error, 1)
 	go func() {
 		logger.Info("server listening", slog.String("address", cfg.HTTPAddr), slog.String("environment", string(cfg.Environment)))
@@ -77,15 +78,34 @@ func run() error {
 	}()
 	select {
 	case err := <-serverErrors:
+		stop()
+		closeErr := server.Close()
+		<-cleanupDone
 		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+			return closeErr
 		}
-		return err
+		return errors.Join(err, closeErr)
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return server.Shutdown(shutdownCtx)
+		stop()
+		shutdownErr := shutdownServerWithin(server, serverShutdownTimeout)
+		<-cleanupDone
+		return shutdownErr
 	}
+}
+
+const serverShutdownTimeout = 10 * time.Second
+
+func shutdownServerWithin(server *http.Server, timeout time.Duration) error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	shutdownErr := server.Shutdown(shutdownCtx)
+	if shutdownErr == nil {
+		return nil
+	}
+	if closeErr := server.Close(); closeErr != nil {
+		return errors.Join(shutdownErr, closeErr)
+	}
+	return shutdownErr
 }
 
 func requireCurrentSchema(ctx context.Context, pool *pgxpool.Pool, available []migrate.Migration) error {
@@ -117,6 +137,15 @@ func databaseReadinessWithin(pool *pgxpool.Pool, available []migrate.Migration, 
 		}
 		return nil
 	}
+}
+
+func startCleanup(ctx context.Context, logger *slog.Logger, service *identity.Service, interval time.Duration) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runCleanup(ctx, logger, service, interval)
+	}()
+	return done
 }
 
 func runCleanup(ctx context.Context, logger *slog.Logger, service *identity.Service, interval time.Duration) {

@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,10 +15,101 @@ import (
 	"github.com/1yoouoo/mcpaste/db/migrations"
 	"github.com/1yoouoo/mcpaste/internal/database/migrate"
 	"github.com/1yoouoo/mcpaste/internal/httpserver"
+	"github.com/1yoouoo/mcpaste/internal/identity"
+	identitypostgres "github.com/1yoouoo/mcpaste/internal/identity/postgres"
 	"github.com/1yoouoo/mcpaste/internal/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestShutdownServerWithinForceClosesActiveRequest(t *testing.T) {
+	if serverShutdownTimeout != 10*time.Second {
+		t.Fatalf("production shutdown timeout = %v", serverShutdownTimeout)
+	}
+	requestStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	server := &http.Server{Handler: http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(requestStarted)
+		<-request.Context().Done()
+		close(requestCanceled)
+	})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = listener.Close()
+	})
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.Serve(listener)
+	}()
+	transport := &http.Transport{Proxy: nil}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport}
+	requestDone := make(chan error, 1)
+	go func() {
+		response, requestErr := client.Get("http://" + listener.Addr().String())
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- requestErr
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("blocking request did not start")
+	}
+
+	started := time.Now()
+	err = shutdownServerWithin(server, 25*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("forced shutdown exceeded bound: %v", elapsed)
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("forced shutdown did not cancel request context")
+	}
+	select {
+	case serveErr := <-serveDone:
+		if !errors.Is(serveErr, http.ErrServerClosed) {
+			t.Fatalf("Serve() error = %v", serveErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve() did not return after forced shutdown")
+	}
+	select {
+	case requestErr := <-requestDone:
+		if requestErr == nil {
+			t.Fatal("forced shutdown left blocking request connected")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocking client did not return after forced shutdown")
+	}
+}
+
+func TestCleanupWorkerStopsOnCancellationBeforePoolClose(t *testing.T) {
+	pool := testdb.New(t)
+	service := identity.NewService(identitypostgres.New(pool), nil, nil, identity.RealClock{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cleanupDone := startCleanup(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), service, time.Hour)
+	cancel()
+	select {
+	case <-cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup worker did not stop after cancellation")
+	}
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), time.Second)
+	defer pingCancel()
+	if err := pool.Ping(pingCtx); err != nil {
+		t.Fatalf("pool closed before cleanup worker exited: %v", err)
+	}
+}
 
 func TestStartupAndReadinessRequireCurrentSchema(t *testing.T) {
 	ctx := context.Background()
