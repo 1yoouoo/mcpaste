@@ -8,9 +8,15 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+const cleanupAdvisoryLockName = "mcpaste.identity.cleanup"
+
 func (s *Store) Cleanup(ctx context.Context, now time.Time) (identity.CleanupResult, error) {
 	var result identity.CleanupResult
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+select pg_advisory_xact_lock(hashtextextended($1, 0))`, cleanupAdvisoryLockName); err != nil {
+			return err
+		}
 		rows, err := tx.Query(ctx, `
 select workspace_id::text, id::text, device_id::text
 from pairing_requests
@@ -18,7 +24,7 @@ where approved_at is not null
   and claimed_at is null
   and claim_invalidated_at is null
   and claim_expires_at <= $1
-order by workspace_id, claim_expires_at, id
+order by claim_expires_at, id
 for update skip locked
 limit 100`, now)
 		if err != nil {

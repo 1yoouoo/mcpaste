@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -1023,16 +1022,16 @@ where p.workspace_id = $1::uuid and p.id = $2::uuid`, workspaceOne, pairingID).S
 	}
 }
 
-func TestCleanupLocksExpiredGrantsInWorkspaceOrder(t *testing.T) {
+func TestCleanupPrioritizesOldestExpiredGrantAcrossWorkspaces(t *testing.T) {
 	ctx := context.Background()
 	pool := testdb.New(t)
 	store := New(pool)
 	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
 
-	seedExpiredCleanupGrants(t, ctx, pool, now, workspaceOne, deviceOne, "8201", "8301", 0, 60, 0, 2)
+	seedExpiredCleanupGrants(t, ctx, pool, now, workspaceOne, deviceOne, "8201", "8301", 0, 101, 0, 1)
 	seedExpiredCleanupGrants(
 		t, ctx, pool, now, workspaceTwo, "00000000-0000-4000-8000-000000000202",
-		"8202", "8302", 100, 60, -1, 2,
+		"8202", "8302", 200, 1, 199, 1,
 	)
 
 	result, err := store.Cleanup(ctx, now)
@@ -1042,91 +1041,145 @@ func TestCleanupLocksExpiredGrantsInWorkspaceOrder(t *testing.T) {
 	if result.RevokedDevices != 100 {
 		t.Fatalf("RevokedDevices = %d", result.RevokedDevices)
 	}
-	for _, check := range []struct {
-		workspaceID string
-		want        int
-	}{
-		{workspaceID: workspaceOne, want: 60},
-		{workspaceID: workspaceTwo, want: 40},
-	} {
-		var invalidated int
-		if err := pool.QueryRow(ctx, `
-select count(*)
-from pairing_requests
-where workspace_id = $1::uuid and claim_invalidated_at is not null`, check.workspaceID).Scan(&invalidated); err != nil {
-			t.Fatalf("count invalidated grants for workspace %s: %v", check.workspaceID, err)
-		}
-		if invalidated != check.want {
-			t.Fatalf("invalidated grants for workspace %s = %d, want %d", check.workspaceID, invalidated, check.want)
-		}
+	var highWorkspaceInvalidated, highWorkspaceRevoked int
+	if err := pool.QueryRow(ctx, `
+select (select count(*) from pairing_requests
+        where workspace_id = $1::uuid and claim_invalidated_at is not null),
+       (select count(*) from devices
+        where workspace_id = $1::uuid and role = 'connector' and revoked_at is not null)`, workspaceTwo).Scan(
+		&highWorkspaceInvalidated, &highWorkspaceRevoked,
+	); err != nil {
+		t.Fatalf("inspect oldest high-workspace grant: %v", err)
+	}
+	if highWorkspaceInvalidated != 1 || highWorkspaceRevoked != 1 {
+		t.Fatalf(
+			"oldest high-workspace grant state = invalidated:%d revoked:%d",
+			highWorkspaceInvalidated, highWorkspaceRevoked,
+		)
 	}
 }
 
 func TestConcurrentCleanupAcrossWorkspacesReachesConsistentTerminalState(t *testing.T) {
-	for attempt := 1; attempt <= 5; attempt++ {
-		t.Run(fmt.Sprintf("attempt_%d", attempt), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			pool := testdb.New(t)
-			store := New(pool)
-			now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool := testdb.New(t)
+	store := New(pool)
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
 
-			seedExpiredCleanupGrants(t, ctx, pool, now, workspaceOne, deviceOne, "8401", "8501", 0, 60, 0, 2)
-			seedExpiredCleanupGrants(
-				t, ctx, pool, now, workspaceTwo, "00000000-0000-4000-8000-000000000202",
-				"8402", "8502", 100, 60, -1, 2,
-			)
+	seedExpiredCleanupGrants(t, ctx, pool, now, workspaceOne, deviceOne, "8401", "8501", 0, 60, 0, 2)
+	seedExpiredCleanupGrants(
+		t, ctx, pool, now, workspaceTwo, "00000000-0000-4000-8000-000000000202",
+		"8402", "8502", 100, 60, -1, 2,
+	)
 
-			type cleanupOutcome struct {
-				result identity.CleanupResult
-				err    error
-			}
-			start := make(chan struct{})
-			outcomes := make(chan cleanupOutcome, 2)
-			for worker := 0; worker < 2; worker++ {
-				go func() {
-					<-start
-					result, err := store.Cleanup(ctx, now)
-					outcomes <- cleanupOutcome{result: result, err: err}
-				}()
-			}
-			close(start)
-			totalRevoked := int64(0)
-			for worker := 0; worker < 2; worker++ {
-				outcome := <-outcomes
-				if outcome.err != nil {
-					t.Fatalf("concurrent Cleanup() error = %v", outcome.err)
-				}
-				totalRevoked += outcome.result.RevokedDevices
-			}
-			if totalRevoked != 120 {
-				t.Fatalf("concurrent RevokedDevices total = %d", totalRevoked)
-			}
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin cleanup advisory lock blocker: %v", err)
+	}
+	defer func() { _ = blocker.Rollback(context.Background()) }()
+	if _, err := blocker.Exec(ctx, `
+select pg_advisory_xact_lock(hashtextextended($1, 0))`, cleanupAdvisoryLockName); err != nil {
+		t.Fatalf("acquire cleanup advisory lock blocker: %v", err)
+	}
+	var blockerBackendPID int
+	if err := blocker.QueryRow(ctx, "select pg_backend_pid()").Scan(&blockerBackendPID); err != nil {
+		t.Fatalf("read cleanup blocker backend PID: %v", err)
+	}
 
-			var invalidated, revokedDevices, revokedCredentials, revokedEvents int
-			if err := pool.QueryRow(ctx, `
+	type cleanupOutcome struct {
+		result identity.CleanupResult
+		err    error
+	}
+	start := make(chan struct{})
+	outcomes := make(chan cleanupOutcome, 2)
+	for worker := 0; worker < 2; worker++ {
+		go func() {
+			<-start
+			result, err := store.Cleanup(ctx, now)
+			outcomes <- cleanupOutcome{result: result, err: err}
+		}()
+	}
+	close(start)
+	waitCtx, cancelWait := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelWait()
+	waitForCleanupWorkersBlocked(t, waitCtx, pool, blockerBackendPID)
+
+	var invalidatedWhileBlocked int
+	if err := pool.QueryRow(ctx, "select count(*) from pairing_requests where claim_invalidated_at is not null").Scan(
+		&invalidatedWhileBlocked,
+	); err != nil {
+		t.Fatalf("inspect blocked cleanup state: %v", err)
+	}
+	if invalidatedWhileBlocked != 0 {
+		t.Fatalf("invalidated grants while cleanup lock blocked = %d", invalidatedWhileBlocked)
+	}
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatalf("release cleanup advisory lock blocker: %v", err)
+	}
+
+	totalRevoked := int64(0)
+	for worker := 0; worker < 2; worker++ {
+		outcome := <-outcomes
+		if outcome.err != nil {
+			t.Fatalf("concurrent Cleanup() error = %v", outcome.err)
+		}
+		totalRevoked += outcome.result.RevokedDevices
+	}
+	if totalRevoked != 120 {
+		t.Fatalf("concurrent RevokedDevices total = %d", totalRevoked)
+	}
+
+	var invalidated, revokedDevices, revokedCredentials, revokedEvents int
+	if err := pool.QueryRow(ctx, `
 select (select count(*) from pairing_requests where claim_invalidated_at is not null),
        (select count(*) from devices where role = 'connector' and revoked_at is not null),
        (select count(*) from credentials where revoked_at is not null),
        (select count(*) from workspace_events where event_type = 'device.revoked')`).Scan(
-				&invalidated, &revokedDevices, &revokedCredentials, &revokedEvents,
-			); err != nil {
-				t.Fatalf("inspect concurrent cleanup terminal state: %v", err)
+		&invalidated, &revokedDevices, &revokedCredentials, &revokedEvents,
+	); err != nil {
+		t.Fatalf("inspect concurrent cleanup terminal state: %v", err)
+	}
+	if invalidated != 120 || revokedDevices != 120 || revokedCredentials != 120 || revokedEvents != 120 {
+		t.Fatalf(
+			"terminal counts = invalidated:%d devices:%d credentials:%d events:%d",
+			invalidated, revokedDevices, revokedCredentials, revokedEvents,
+		)
+	}
+	result, err := store.Cleanup(ctx, now)
+	if err != nil {
+		t.Fatalf("terminal Cleanup() error = %v", err)
+	}
+	if result.RevokedDevices != 0 {
+		t.Fatalf("terminal RevokedDevices = %d", result.RevokedDevices)
+	}
+}
+
+func waitForCleanupWorkersBlocked(t *testing.T, ctx context.Context, pool *pgxpool.Pool, blockerBackendPID int) {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waitingWorkers int
+		if err := pool.QueryRow(ctx, `
+select count(*)
+from pg_stat_activity waiting_cleanup
+where waiting_cleanup.datname = current_database()
+  and waiting_cleanup.wait_event_type = 'Lock'
+  and position('pg_advisory_xact_lock(hashtextextended' in waiting_cleanup.query) > 0
+  and $1::integer = any(pg_blocking_pids(waiting_cleanup.pid))`, blockerBackendPID).Scan(&waitingWorkers); err != nil {
+			if ctx.Err() != nil {
+				t.Fatalf("cleanup workers waiting on blocker = %d, want 2", waitingWorkers)
 			}
-			if invalidated != 120 || revokedDevices != 120 || revokedCredentials != 120 || revokedEvents != 120 {
-				t.Fatalf(
-					"terminal counts = invalidated:%d devices:%d credentials:%d events:%d",
-					invalidated, revokedDevices, revokedCredentials, revokedEvents,
-				)
-			}
-			result, err := store.Cleanup(ctx, now)
-			if err != nil {
-				t.Fatalf("terminal Cleanup() error = %v", err)
-			}
-			if result.RevokedDevices != 0 {
-				t.Fatalf("terminal RevokedDevices = %d", result.RevokedDevices)
-			}
-		})
+			t.Fatalf("inspect blocked cleanup workers: %v", err)
+		}
+		if waitingWorkers == 2 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("cleanup workers waiting on blocker = %d, want 2", waitingWorkers)
+		case <-ticker.C:
+		}
 	}
 }
 
