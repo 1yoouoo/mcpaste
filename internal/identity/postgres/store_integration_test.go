@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +19,8 @@ import (
 const workspaceOne = "00000000-0000-4000-8000-000000000101"
 const workspaceTwo = "00000000-0000-4000-8000-000000000102"
 const deviceOne = "00000000-0000-4000-8000-000000000201"
+
+var cleanupTestApplicationCounter atomic.Uint64
 
 func TestWorkspaceScopedCredentialAuthentication(t *testing.T) {
 	ctx := context.Background()
@@ -1062,7 +1067,8 @@ select (select count(*) from pairing_requests
 func TestConcurrentCleanupAcrossWorkspacesReachesConsistentTerminalState(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	pool := testdb.New(t)
+	basePool := testdb.New(t)
+	pool, applicationName := newCleanupTestPool(t, ctx, basePool)
 	store := New(pool)
 	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
 
@@ -1102,7 +1108,7 @@ select pg_advisory_xact_lock(hashtextextended($1, 0))`, cleanupAdvisoryLockName)
 	close(start)
 	waitCtx, cancelWait := context.WithTimeout(ctx, 2*time.Second)
 	defer cancelWait()
-	waitForCleanupWorkersBlocked(t, waitCtx, pool, blockerBackendPID)
+	waitForCleanupWorkersBlocked(t, waitCtx, pool, applicationName, blockerBackendPID)
 
 	var invalidatedWhileBlocked int
 	if err := pool.QueryRow(ctx, "select count(*) from pairing_requests where claim_invalidated_at is not null").Scan(
@@ -1154,7 +1160,39 @@ select (select count(*) from pairing_requests where claim_invalidated_at is not 
 	}
 }
 
-func waitForCleanupWorkersBlocked(t *testing.T, ctx context.Context, pool *pgxpool.Pool, blockerBackendPID int) {
+func newCleanupTestPool(
+	t *testing.T,
+	ctx context.Context,
+	basePool *pgxpool.Pool,
+) (*pgxpool.Pool, string) {
+	t.Helper()
+	applicationName := fmt.Sprintf(
+		"mcpaste-cleanup-test-%d-%d",
+		os.Getpid(), cleanupTestApplicationCounter.Add(1),
+	)
+	config := basePool.Config()
+	if config.ConnConfig.RuntimeParams == nil {
+		config.ConnConfig.RuntimeParams = make(map[string]string)
+	}
+	config.ConnConfig.RuntimeParams["application_name"] = applicationName
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open dedicated cleanup test pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := pool.Ping(ctx); err != nil {
+		t.Fatalf("connect dedicated cleanup test pool: %v", err)
+	}
+	return pool, applicationName
+}
+
+func waitForCleanupWorkersBlocked(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	applicationName string,
+	blockerBackendPID int,
+) {
 	t.Helper()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
@@ -1164,9 +1202,10 @@ func waitForCleanupWorkersBlocked(t *testing.T, ctx context.Context, pool *pgxpo
 select count(*)
 from pg_stat_activity waiting_cleanup
 where waiting_cleanup.datname = current_database()
+  and waiting_cleanup.application_name = $2
   and waiting_cleanup.wait_event_type = 'Lock'
   and position('pg_advisory_xact_lock(hashtextextended' in waiting_cleanup.query) > 0
-  and $1::integer = any(pg_blocking_pids(waiting_cleanup.pid))`, blockerBackendPID).Scan(&waitingWorkers); err != nil {
+  and $1::integer = any(pg_blocking_pids(waiting_cleanup.pid))`, blockerBackendPID, applicationName).Scan(&waitingWorkers); err != nil {
 			if ctx.Err() != nil {
 				t.Fatalf("cleanup workers waiting on blocker = %d, want 2", waitingWorkers)
 			}
