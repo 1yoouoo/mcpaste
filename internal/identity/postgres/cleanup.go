@@ -18,7 +18,7 @@ where approved_at is not null
   and claimed_at is null
   and claim_invalidated_at is null
   and claim_expires_at <= $1
-order by claim_expires_at, id
+order by workspace_id, claim_expires_at, id
 for update skip locked
 limit 100`, now)
 		if err != nil {
@@ -53,15 +53,18 @@ where workspace_id = $1::uuid and id = $2::uuid and revoked_at is null`,
 			if err != nil {
 				return err
 			}
-			result.RevokedDevices += devices.RowsAffected()
+			revokedDevices := devices.RowsAffected()
+			result.RevokedDevices += revokedDevices
 			if _, err := tx.Exec(ctx, `
 update credentials set revoked_at = $3
 where workspace_id = $1::uuid and device_id = $2::uuid and revoked_at is null`,
 				grant.workspaceID, grant.deviceID, now); err != nil {
 				return err
 			}
-			if err := txRepository.InsertEvent(ctx, grant.workspaceID, "device.revoked", grant.deviceID, now); err != nil {
-				return err
+			if revokedDevices == 1 {
+				if err := txRepository.InsertEvent(ctx, grant.workspaceID, "device.revoked", grant.deviceID, now); err != nil {
+					return err
+				}
 			}
 			command, err := tx.Exec(ctx, `
 update pairing_requests set claim_invalidated_at = $3
@@ -77,24 +80,70 @@ where workspace_id = $1::uuid and id = $2::uuid
 		}
 
 		pairings, err := tx.Exec(ctx, `
-delete from pairing_requests
-where metadata_purge_at <= $1
-  and (approved_at is null or claimed_at is not null or claim_invalidated_at is not null)`, now)
+with expired_pairings as (
+    select id
+    from pairing_requests
+    where metadata_purge_at <= $1
+      and (approved_at is null or claimed_at is not null or claim_invalidated_at is not null)
+    order by metadata_purge_at, id
+    for update skip locked
+    limit 100
+)
+delete from pairing_requests as pairing
+using expired_pairings
+where pairing.id = expired_pairings.id`, now)
 		if err != nil {
 			return err
 		}
 		result.PairingRows = pairings.RowsAffected()
-		idempotency, err := tx.Exec(ctx, "delete from idempotency_records where expires_at <= clock_timestamp()")
+		idempotency, err := tx.Exec(ctx, `
+with expired_idempotency as (
+    select scope_id, operation, key_hash
+    from idempotency_records
+    where expires_at <= clock_timestamp()
+    order by expires_at, scope_id, operation, key_hash
+    for update skip locked
+    limit 100
+)
+delete from idempotency_records as record
+using expired_idempotency
+where record.scope_id = expired_idempotency.scope_id
+  and record.operation = expired_idempotency.operation
+  and record.key_hash = expired_idempotency.key_hash`)
 		if err != nil {
 			return err
 		}
 		result.IdempotencyRows = idempotency.RowsAffected()
-		events, err := tx.Exec(ctx, "delete from workspace_events where expires_at <= $1", now)
+		events, err := tx.Exec(ctx, `
+with expired_events as (
+    select workspace_id, sequence
+    from workspace_events
+    where expires_at <= $1
+    order by expires_at, workspace_id, sequence
+    for update skip locked
+    limit 100
+)
+delete from workspace_events as event
+using expired_events
+where event.workspace_id = expired_events.workspace_id
+  and event.sequence = expired_events.sequence`, now)
 		if err != nil {
 			return err
 		}
 		result.EventRows = events.RowsAffected()
-		rateLimits, err := tx.Exec(ctx, "delete from rate_limit_buckets where expires_at <= $1", now)
+		rateLimits, err := tx.Exec(ctx, `
+with expired_rate_limits as (
+    select scope, subject_hash
+    from rate_limit_buckets
+    where expires_at <= $1
+    order by expires_at, scope, subject_hash
+    for update skip locked
+    limit 100
+)
+delete from rate_limit_buckets as bucket
+using expired_rate_limits
+where bucket.scope = expired_rate_limits.scope
+  and bucket.subject_hash = expired_rate_limits.subject_hash`, now)
 		if err != nil {
 			return err
 		}

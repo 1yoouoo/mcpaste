@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -643,6 +644,82 @@ func TestCleanupPurgesExpiredMetadata(t *testing.T) {
 	}
 }
 
+func TestCleanupBoundsEachMetadataPurge(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+
+	if _, err := pool.Exec(ctx, `
+insert into workspaces(id, created_at)
+values ($1::uuid, $2)`, workspaceOne, now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("seed cleanup workspace: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into pairing_requests(
+    id, short_code, claim_hash, proposed_name, platform, requested_scope,
+    created_at, expires_at, metadata_purge_at
+)
+select ('00000000-0000-4000-8101-' || lpad(n::text, 12, '0'))::uuid,
+       'AAAAAA'
+           || substr('23456789ABCDEFGHJKMNPQRSTUVWXYZ', ((n - 1) / 31) + 1, 1)
+           || substr('23456789ABCDEFGHJKMNPQRSTUVWXYZ', ((n - 1) % 31) + 1, 1),
+       decode(repeat('a1', 32), 'hex'), 'Pending ' || n, 'linux', 'connector',
+       $1::timestamptz - interval '2 hours',
+       $1::timestamptz - interval '1 hour',
+       $1::timestamptz - interval '1 hour'
+from generate_series(1, 101) as rows(n)`, now); err != nil {
+		t.Fatalf("seed expired pairings: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into idempotency_records(
+    scope_id, operation, key_hash, workspace_id, request_hash,
+    response_status, response_content_type, response_key_id, response_nonce,
+    response_ciphertext, created_at, expires_at
+)
+select 'public', 'cleanup.test', decode(lpad(to_hex(n), 64, '0'), 'hex'), null,
+       decode(repeat('b1', 32), 'hex'), 200, 'application/json', 'test-key',
+       decode(repeat('b2', 12), 'hex'), decode('b3', 'hex'),
+       $1::timestamptz - interval '25 hours', $1::timestamptz - interval '1 hour'
+from generate_series(1, 101) as rows(n)`, now); err != nil {
+		t.Fatalf("seed expired idempotency records: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into workspace_events(
+    workspace_id, sequence, event_type, object_id, created_at, expires_at
+)
+select $1::uuid, n, 'device.added',
+       ('00000000-0000-4000-8102-' || lpad(n::text, 12, '0'))::uuid,
+       $2::timestamptz - interval '2 hours', $2::timestamptz - interval '1 hour'
+from generate_series(1, 101) as rows(n)`, workspaceOne, now); err != nil {
+		t.Fatalf("seed expired workspace events: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into rate_limit_buckets(
+    scope, subject_hash, window_started_at, request_count, expires_at
+)
+select 'cleanup.test', decode(lpad(to_hex(n), 64, '0'), 'hex'),
+       $1::timestamptz - interval '2 hours', 1, $1::timestamptz - interval '1 hour'
+from generate_series(1, 101) as rows(n)`, now); err != nil {
+		t.Fatalf("seed expired rate limit buckets: %v", err)
+	}
+
+	want := []int64{100, 1, 0}
+	for call, expected := range want {
+		result, err := store.Cleanup(ctx, now)
+		if err != nil {
+			t.Fatalf("Cleanup() call %d error = %v", call+1, err)
+		}
+		if result.PairingRows != expected || result.IdempotencyRows != expected ||
+			result.EventRows != expected || result.RateLimitRows != expected {
+			t.Fatalf(
+				"Cleanup() call %d rows = pairing:%d idempotency:%d events:%d rate_limits:%d, want %d each",
+				call+1, result.PairingRows, result.IdempotencyRows, result.EventRows, result.RateLimitRows, expected,
+			)
+		}
+	}
+}
+
 func TestClaimAndCleanupSerializeGrantValidity(t *testing.T) {
 	ctx := context.Background()
 	pool := testdb.New(t)
@@ -845,5 +922,281 @@ where p.workspace_id = $1::uuid and p.id = $2::uuid`, workspaceOne, pairingID).S
 	})
 	if !errors.Is(err, identity.ErrPairingExpired) {
 		t.Fatalf("claim after cleanup error = %v", err)
+	}
+}
+
+func TestCleanupDoesNotDuplicateRevokedDeviceEvent(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	createdAt := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	cleanupAt := createdAt.Add(6 * time.Minute)
+	pairingID := "00000000-0000-4000-8000-000000000331"
+	joiningDeviceID := "00000000-0000-4000-8000-000000000332"
+	claimHash := bytes.Repeat([]byte{0xc1}, 32)
+	credentialHash := bytes.Repeat([]byte{0xc2}, 32)
+	credentialLocator := "EEEEEEEEEEEEEEEEEEEEEE"
+
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceOne, createdAt); err != nil {
+			return err
+		}
+		approver, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: deviceOne, DisplayName: "Approver", Platform: "macos", Role: "full", CreatedAt: createdAt,
+		})
+		if err != nil {
+			return err
+		}
+		if err := tx.InsertPairing(ctx, identity.Pairing{
+			ID: pairingID, ShortCode: "2345678C", ClaimHash: claimHash,
+			ProposedName: "Joiner", Platform: "linux", RequestedScope: "connector",
+			CreatedAt: createdAt, ExpiresAt: createdAt.Add(identity.PairingLifetime),
+			MetadataPurgeAt: createdAt.Add(identity.PairingLifetime + identity.PairingMetadataLifetime),
+		}); err != nil {
+			return err
+		}
+		joining, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: joiningDeviceID, DisplayName: "Joiner", Platform: "linux", Role: "connector", CreatedAt: createdAt,
+		})
+		if err != nil {
+			return err
+		}
+		if err := tx.InsertCredential(ctx, workspaceOne, identity.CredentialRecord{
+			DeviceID: joining.ID, Locator: credentialLocator, Scope: "connector", Hash: credentialHash, CreatedAt: createdAt,
+		}); err != nil {
+			return err
+		}
+		grant := secure.Envelope{KeyID: "test-key", Nonce: bytes.Repeat([]byte{0xc3}, 12), Ciphertext: []byte{0xc4}}
+		if err := tx.ApprovePairing(
+			ctx, workspaceOne, pairingID, approver.ID, joining.ID,
+			createdAt, createdAt.Add(identity.ClaimLifetime), grant,
+			createdAt.Add(identity.ClaimLifetime+identity.PairingMetadataLifetime),
+		); err != nil {
+			return err
+		}
+		if err := tx.RevokeDevice(ctx, workspaceOne, joining.ID, createdAt.Add(time.Minute)); err != nil {
+			return err
+		}
+		return tx.InsertEvent(ctx, workspaceOne, "device.revoked", joining.ID, createdAt.Add(time.Minute))
+	})
+	if err != nil {
+		t.Fatalf("seed already-revoked grant: %v", err)
+	}
+
+	result, err := store.Cleanup(ctx, cleanupAt)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if result.RevokedDevices != 0 {
+		t.Fatalf("RevokedDevices = %d", result.RevokedDevices)
+	}
+
+	var deviceRevoked, credentialRevoked, invalidatedAt *time.Time
+	var eventCount int
+	if err := pool.QueryRow(ctx, `
+select d.revoked_at, c.revoked_at, p.claim_invalidated_at,
+       (select count(*) from workspace_events e
+        where e.workspace_id = p.workspace_id and e.event_type = 'device.revoked' and e.object_id = p.device_id)
+from pairing_requests p
+join devices d on d.workspace_id = p.workspace_id and d.id = p.device_id
+join credentials c on c.workspace_id = d.workspace_id and c.device_id = d.id
+where p.workspace_id = $1::uuid and p.id = $2::uuid`, workspaceOne, pairingID).Scan(
+		&deviceRevoked, &credentialRevoked, &invalidatedAt, &eventCount,
+	); err != nil {
+		t.Fatalf("inspect already-revoked cleanup state: %v", err)
+	}
+	if deviceRevoked == nil || credentialRevoked == nil || invalidatedAt == nil {
+		t.Fatalf(
+			"already-revoked cleanup state: device=%v credential=%v invalidated=%v",
+			deviceRevoked != nil, credentialRevoked != nil, invalidatedAt != nil,
+		)
+	}
+	if eventCount != 1 {
+		t.Fatalf("device.revoked event count = %d", eventCount)
+	}
+	err = store.WithinTx(ctx, func(tx identity.TxStore) error {
+		_, err := tx.LockPairingForClaim(ctx, pairingID, claimHash, cleanupAt)
+		return err
+	})
+	if !errors.Is(err, identity.ErrPairingExpired) {
+		t.Fatalf("claim after cleanup error = %v", err)
+	}
+}
+
+func TestCleanupLocksExpiredGrantsInWorkspaceOrder(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+
+	seedExpiredCleanupGrants(t, ctx, pool, now, workspaceOne, deviceOne, "8201", "8301", 0, 60, 0, 2)
+	seedExpiredCleanupGrants(
+		t, ctx, pool, now, workspaceTwo, "00000000-0000-4000-8000-000000000202",
+		"8202", "8302", 100, 60, -1, 2,
+	)
+
+	result, err := store.Cleanup(ctx, now)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if result.RevokedDevices != 100 {
+		t.Fatalf("RevokedDevices = %d", result.RevokedDevices)
+	}
+	for _, check := range []struct {
+		workspaceID string
+		want        int
+	}{
+		{workspaceID: workspaceOne, want: 60},
+		{workspaceID: workspaceTwo, want: 40},
+	} {
+		var invalidated int
+		if err := pool.QueryRow(ctx, `
+select count(*)
+from pairing_requests
+where workspace_id = $1::uuid and claim_invalidated_at is not null`, check.workspaceID).Scan(&invalidated); err != nil {
+			t.Fatalf("count invalidated grants for workspace %s: %v", check.workspaceID, err)
+		}
+		if invalidated != check.want {
+			t.Fatalf("invalidated grants for workspace %s = %d, want %d", check.workspaceID, invalidated, check.want)
+		}
+	}
+}
+
+func TestConcurrentCleanupAcrossWorkspacesReachesConsistentTerminalState(t *testing.T) {
+	for attempt := 1; attempt <= 5; attempt++ {
+		t.Run(fmt.Sprintf("attempt_%d", attempt), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			pool := testdb.New(t)
+			store := New(pool)
+			now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+
+			seedExpiredCleanupGrants(t, ctx, pool, now, workspaceOne, deviceOne, "8401", "8501", 0, 60, 0, 2)
+			seedExpiredCleanupGrants(
+				t, ctx, pool, now, workspaceTwo, "00000000-0000-4000-8000-000000000202",
+				"8402", "8502", 100, 60, -1, 2,
+			)
+
+			type cleanupOutcome struct {
+				result identity.CleanupResult
+				err    error
+			}
+			start := make(chan struct{})
+			outcomes := make(chan cleanupOutcome, 2)
+			for worker := 0; worker < 2; worker++ {
+				go func() {
+					<-start
+					result, err := store.Cleanup(ctx, now)
+					outcomes <- cleanupOutcome{result: result, err: err}
+				}()
+			}
+			close(start)
+			totalRevoked := int64(0)
+			for worker := 0; worker < 2; worker++ {
+				outcome := <-outcomes
+				if outcome.err != nil {
+					t.Fatalf("concurrent Cleanup() error = %v", outcome.err)
+				}
+				totalRevoked += outcome.result.RevokedDevices
+			}
+			if totalRevoked != 120 {
+				t.Fatalf("concurrent RevokedDevices total = %d", totalRevoked)
+			}
+
+			var invalidated, revokedDevices, revokedCredentials, revokedEvents int
+			if err := pool.QueryRow(ctx, `
+select (select count(*) from pairing_requests where claim_invalidated_at is not null),
+       (select count(*) from devices where role = 'connector' and revoked_at is not null),
+       (select count(*) from credentials where revoked_at is not null),
+       (select count(*) from workspace_events where event_type = 'device.revoked')`).Scan(
+				&invalidated, &revokedDevices, &revokedCredentials, &revokedEvents,
+			); err != nil {
+				t.Fatalf("inspect concurrent cleanup terminal state: %v", err)
+			}
+			if invalidated != 120 || revokedDevices != 120 || revokedCredentials != 120 || revokedEvents != 120 {
+				t.Fatalf(
+					"terminal counts = invalidated:%d devices:%d credentials:%d events:%d",
+					invalidated, revokedDevices, revokedCredentials, revokedEvents,
+				)
+			}
+			result, err := store.Cleanup(ctx, now)
+			if err != nil {
+				t.Fatalf("terminal Cleanup() error = %v", err)
+			}
+			if result.RevokedDevices != 0 {
+				t.Fatalf("terminal RevokedDevices = %d", result.RevokedDevices)
+			}
+		})
+	}
+}
+
+func seedExpiredCleanupGrants(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	now time.Time,
+	workspaceID string,
+	approverDeviceID string,
+	deviceUUIDGroup string,
+	pairingUUIDGroup string,
+	ordinalBase int,
+	count int,
+	expiryOffset int,
+	expiryStride int,
+) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `
+insert into workspaces(id, created_at)
+values ($1::uuid, $2)`, workspaceID, now.Add(-10*time.Minute)); err != nil {
+		t.Fatalf("seed cleanup workspace %s: %v", workspaceID, err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into devices(id, workspace_id, display_name, platform, role, created_at)
+values ($1::uuid, $2::uuid, 'Approver', 'macos', 'full', $3)`,
+		approverDeviceID, workspaceID, now.Add(-10*time.Minute)); err != nil {
+		t.Fatalf("seed cleanup approver for workspace %s: %v", workspaceID, err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into devices(id, workspace_id, display_name, platform, role, created_at)
+select ('00000000-0000-4000-' || $3 || '-' || lpad(($4 + n)::text, 12, '0'))::uuid,
+       $1::uuid, 'Joiner ' || n, 'linux', 'connector', $2
+from generate_series(1, $5) as rows(n)`,
+		workspaceID, now.Add(-10*time.Minute), deviceUUIDGroup, ordinalBase, count); err != nil {
+		t.Fatalf("seed cleanup joining devices for workspace %s: %v", workspaceID, err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into credentials(workspace_id, device_id, token_id, scope, secret_hash, created_at)
+select $1::uuid,
+       ('00000000-0000-4000-' || $3 || '-' || lpad(($4 + n)::text, 12, '0'))::uuid,
+       lpad(($4 + n)::text, 22, 'A'), 'connector', decode(repeat('d1', 32), 'hex'), $2
+from generate_series(1, $5) as rows(n)`,
+		workspaceID, now.Add(-10*time.Minute), deviceUUIDGroup, ordinalBase, count); err != nil {
+		t.Fatalf("seed cleanup credentials for workspace %s: %v", workspaceID, err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into pairing_requests(
+    id, short_code, claim_hash, proposed_name, platform, requested_scope,
+    workspace_id, approved_by_device_id, device_id,
+    created_at, expires_at, approved_at, claim_expires_at,
+    grant_key_id, grant_nonce, grant_ciphertext, metadata_purge_at
+)
+select ('00000000-0000-4000-' || $4 || '-' || lpad(($5 + n)::text, 12, '0'))::uuid,
+       'AAAAA'
+           || substr('23456789ABCDEFGHJKMNPQRSTUVWXYZ', ((($5 + n - 1) / 961) % 31) + 1, 1)
+           || substr('23456789ABCDEFGHJKMNPQRSTUVWXYZ', ((($5 + n - 1) / 31) % 31) + 1, 1)
+           || substr('23456789ABCDEFGHJKMNPQRSTUVWXYZ', (($5 + n - 1) % 31) + 1, 1),
+       decode(repeat('d2', 32), 'hex'), 'Joiner ' || n, 'linux', 'connector',
+       $1::uuid, $2::uuid,
+       ('00000000-0000-4000-' || $3 || '-' || lpad(($5 + n)::text, 12, '0'))::uuid,
+       $6::timestamptz - interval '10 minutes', $6::timestamptz + interval '1 hour',
+       $6::timestamptz - interval '9 minutes',
+       $6::timestamptz - (($7 + $8 * n) * interval '1 second'),
+       'test-key', decode(repeat('d3', 12), 'hex'), decode('d4', 'hex'),
+       $6::timestamptz + interval '24 hours'
+from generate_series(1, $9) as rows(n)`,
+		workspaceID, approverDeviceID, deviceUUIDGroup, pairingUUIDGroup, ordinalBase,
+		now, expiryOffset, expiryStride, count,
+	); err != nil {
+		t.Fatalf("seed expired cleanup grants for workspace %s: %v", workspaceID, err)
 	}
 }
