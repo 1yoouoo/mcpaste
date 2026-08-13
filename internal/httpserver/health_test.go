@@ -49,26 +49,36 @@ func TestReadyz(t *testing.T) {
 			wantStatus: http.StatusServiceUnavailable,
 			wantBody:   "{\"status\":\"unavailable\"}\n",
 		},
+		{
+			name: "database detail redacted",
+			readiness: func(_ context.Context) error {
+				return errors.New("postgres-password-secret-marker")
+			},
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   "{\"status\":\"unavailable\"}\n",
+		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, item := range tests {
+		t.Run(item.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 			response := httptest.NewRecorder()
 
-			NewHandler(tt.readiness).ServeHTTP(response, request)
+			NewHandler(item.readiness).ServeHTTP(response, request)
 
-			if response.Code != tt.wantStatus {
-				t.Fatalf("status = %d, want %d", response.Code, tt.wantStatus)
+			if response.Code != item.wantStatus {
+				t.Fatalf("status = %d, want %d", response.Code, item.wantStatus)
 			}
 			if contentType := response.Header().Get("Content-Type"); contentType != "application/json" {
 				t.Fatalf("Content-Type = %q, want application/json", contentType)
 			}
-			if body := response.Body.String(); body != tt.wantBody {
-				t.Fatalf("body = %q, want %q", body, tt.wantBody)
+			if body := response.Body.String(); body != item.wantBody {
+				t.Fatalf("response body bytes = %d, want %d", len(body), len(item.wantBody))
 			}
-			if strings.Contains(response.Body.String(), "database-password-secret") {
-				t.Fatal("response contains readiness error")
+			for markerIndex, marker := range []string{"database-password-secret", "postgres-password-secret-marker"} {
+				if strings.Contains(response.Body.String(), marker) {
+					t.Fatalf("response contains readiness marker index %d", markerIndex)
+				}
 			}
 		})
 	}
