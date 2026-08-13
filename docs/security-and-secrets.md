@@ -150,7 +150,7 @@ This check supplements, and does not prove the absence of, secrets. Regex litera
 
 ## Production placement and network boundary
 
-Production requirements are that the server environment live directly on the Droplet at `/etc/mcpaste/server.env`, owned by `root` and mode `0600`; it must not be baked into an image or passed through GitHub Actions. Caddy must be the public entry point. PostgreSQL must have no public port. Authentication values must use headers and never query strings.
+Production requirements are that the server environment live directly on the Droplet at `/etc/mcpaste/server.env`, owned by `root` and mode `0600`; it must not be baked into an image or passed through GitHub Actions. Caddy must be the public entry point. PostgreSQL must have no public port. Authentication values must use headers and never query strings. See the [operations runbook](operations.md) for topology and rollback, and [release runbook](releases.md) for artifact verification.
 
 ## Logging and capture safety
 

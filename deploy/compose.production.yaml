@@ -1,0 +1,75 @@
+services:
+  caddy:
+    image: caddy:2.9.1-alpine@sha256:b4e3952384eb9524a887633ce65c752dd7c71314d2c2acf98cd5c715aaa534f0
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      MCPASTE_DOMAIN: ${MCPASTE_DOMAIN:?MCPASTE_DOMAIN is required}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - public
+      - private
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  server:
+    image: ${MCPASTE_IMAGE:?MCPASTE_IMAGE must be an immutable image digest}
+    restart: unless-stopped
+    env_file:
+      - ${MCPASTE_SERVER_ENV_FILE:-/etc/mcpaste/server.env}
+    environment:
+      MCPASTE_ENV: production
+      MCPASTE_HTTP_ADDR: :8080
+      MCPASTE_DATA_DIR: /var/lib/mcpaste/data
+    expose:
+      - "8080"
+    volumes:
+      - mcpaste-data:/var/lib/mcpaste/data
+    networks:
+      - private
+    healthcheck:
+      test: ["CMD", "/mcpaste-healthcheck", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  postgres:
+    image: postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+    restart: unless-stopped
+    env_file:
+      - ${MCPASTE_SERVER_ENV_FILE:-/etc/mcpaste/server.env}
+    environment:
+      POSTGRES_DB: mcpaste
+      POSTGRES_USER: mcpaste
+    volumes:
+      - mcpaste-postgres:/var/lib/postgresql/data
+    networks:
+      - private
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcpaste -d mcpaste"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  caddy-data:
+  caddy-config:
+  mcpaste-data:
+  mcpaste-postgres:
+
+networks:
+  public:
+  private:
+    internal: true

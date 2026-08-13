@@ -24,7 +24,7 @@ func TestStatusReportsPartialAndRequireCurrentRejectsIt(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if len(status.Applied) != 0 || status.Available != 2 {
+		if len(status.Applied) != 0 || status.Available != 3 {
 			t.Fatalf("partial status counts = %d/%d", len(status.Applied), status.Available)
 		}
 		if _, err := migrate.RequireCurrent(ctx, conn, available); !errors.Is(err, migrate.ErrMigrationsNotCurrent) {
@@ -37,7 +37,7 @@ func TestStatusReportsPartialAndRequireCurrentRejectsIt(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if len(current.Applied) != 2 || current.Available != 2 {
+		if len(current.Applied) != 3 || current.Available != 3 {
 			t.Fatalf("current status counts = %d/%d", len(current.Applied), current.Available)
 		}
 		return nil
@@ -62,18 +62,18 @@ func TestUpStatusDownAndReapply(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if len(status.Applied) != 2 || status.Available != 2 || status.Applied[0].Name != "identity" || status.Applied[1].Name != "text_pastes" {
+		if len(status.Applied) != 3 || status.Available != 3 || status.Applied[0].Name != "identity" || status.Applied[1].Name != "text_pastes" || status.Applied[2].Name != "image_bundles" {
 			t.Fatalf("status counts/name = %d/%d/%q", len(status.Applied), status.Available, status.Applied[0].Name)
 		}
 		if err := migrate.DownOne(ctx, conn, available); err != nil {
 			return err
 		}
 		var tableName *string
-		if err := conn.QueryRow(ctx, "select to_regclass('pastes')::text").Scan(&tableName); err != nil {
+		if err := conn.QueryRow(ctx, "select to_regclass('paste_assets')::text").Scan(&tableName); err != nil {
 			return err
 		}
 		if tableName != nil {
-			t.Fatalf("pastes still exists: %q", *tableName)
+			t.Fatalf("paste_assets still exists: %q", *tableName)
 		}
 		return migrate.Up(ctx, conn, available)
 	})
@@ -118,7 +118,7 @@ func TestCheckCurrentSucceedsInsideReadOnlyTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckCurrent() error = %v", err)
 	}
-	if len(status.Applied) != status.Available || status.Available != 2 {
+	if len(status.Applied) != status.Available || status.Available != 3 {
 		t.Fatalf("read-only current counts = %d/%d", len(status.Applied), status.Available)
 	}
 }

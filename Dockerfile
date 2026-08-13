@@ -12,15 +12,18 @@ COPY db ./db
 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mcpaste-server ./cmd/server
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mcpaste-migrate ./cmd/migrate
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mcpaste-healthcheck ./cmd/healthcheck
 
 FROM scratch
 
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/mcpaste-server /mcpaste-server
 COPY --from=build /out/mcpaste-migrate /mcpaste-migrate
+COPY --from=build /out/mcpaste-healthcheck /mcpaste-healthcheck
 
 USER 65532:65532
 
 EXPOSE 8080
+VOLUME ["/var/lib/mcpaste/data"]
 
 ENTRYPOINT ["/mcpaste-server"]

@@ -1,0 +1,7 @@
+{$MCPASTE_DOMAIN} {
+    encode gzip zstd
+    request_body {
+        max_size 512MB
+    }
+    reverse_proxy server:8080
+}

@@ -2,7 +2,7 @@
 
 MCPaste is a macOS menu bar app that deliberately hands plain text and static images to AI coding tools through MCP.
 
-> Status: early development. The approved design exists, but the app, service, and connector are unreleased.
+> Status: local Phase 6 implementation complete; no production deployment or public release has been performed.
 
 ## Product boundary
 
@@ -18,7 +18,7 @@ MCPaste is not end-to-end encrypted: the service decrypts data. The approved des
 
 See [Security and secrets](docs/security-and-secrets.md) and the [Security Policy](SECURITY.md).
 
-## Planned text architecture
+## Architecture
 
 ```text
 Full Mac app --HTTPS write/sync--> MCPaste service --> PostgreSQL/files
@@ -29,11 +29,15 @@ Codex / Claude Code --STDIO--> mcpaste connector --Streamable HTTP MCP--> MCPast
 
 The production MVP is one DigitalOcean Droplet with Caddy, the Go service, and PostgreSQL. The implementation consists of a SwiftUI app, Go service, and Go connector.
 
+Static images are normalized on macOS, encrypted on the server, retained for 24 hours, and returned to the read-only MCP tool as ordered image blocks. Text revisions remain immutable and are retained for one year.
+
 ## Development prerequisites
 
 - Go version from `.go-version`
 - Docker
-- Full Xcode only during the macOS app phase
+- Full Xcode for SwiftPM tests, archive, signing, and notarization
+
+Production setup and rollback are documented in [Operations](docs/operations.md); artifact verification is in [Releases](docs/releases.md).
 
 Start PostgreSQL, initialize the ignored mode-0600 local environment once, migrate, and run the server with:
 
@@ -139,7 +143,7 @@ go run ./cmd/server
 
 The listener check is read-only. If port 55439 is occupied, stop setup and identify the owner; never stop or reconfigure an unrelated process or container. `docker compose up -d --wait --wait-timeout 60 postgres` waits for the defined healthcheck and fails after 60 seconds instead of racing a cold database. On later sessions, run `set -a; source .env.local; set +a`; the bootstrap keeps all existing non-sensitive variables and never replaces an existing `MCPASTE_ENCRYPTION_KEYS` line. Keep every old key ID and key value while the PostgreSQL volume contains encrypted replay rows. For an intentional rotation, add a newly generated key under a new ID, retain all old `id:key` entries in `MCPASTE_ENCRYPTION_KEYS`, and change `MCPASTE_ACTIVE_KEY_ID` to the new ID. Never reuse an old ID with new bytes. If the retained key is lost or a disposable local reset is preferred, run `docker compose down --volumes`, remove `.env.local`, and rerun the bootstrap; the volume deletion is destructive.
 
-`go run ./cmd/migrate status` and `go run ./cmd/migrate verify` must report `applied=2 available=2`. `go run ./cmd/migrate down --steps 1` is destructive local rollback and is never part of application rollback. Stop local PostgreSQL without deleting data with `docker compose down`.
+`go run ./cmd/migrate status` and `go run ./cmd/migrate verify` must report `applied=3 available=3`. `go run ./cmd/migrate down --steps 1` is destructive local rollback and is never part of application rollback. Stop local PostgreSQL without deleting data with `docker compose down`.
 
 Phase 2 exposes anonymous workspace, pairing, recovery, and full-device administration under `/v1/`. Authorization and idempotency values use headers. Pairing claim and recovery values use JSON request bodies. Never put tokens, pairing codes, claim secrets, recovery codes, or QR payloads in a URL, command history, log, screenshot, issue, or pull request.
 
