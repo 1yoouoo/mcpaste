@@ -450,7 +450,12 @@ func (s *Service) Recover(ctx context.Context, clientIP, idempotencyKey string, 
 }
 
 func (s *Service) Cleanup(ctx context.Context) (CleanupResult, error) {
-	return s.store.Cleanup(ctx, s.clock.Now())
+	result, err := s.store.Cleanup(ctx, s.clock.Now())
+	if err != nil {
+		return result, err
+	}
+	result.TextRevisionRows, result.TextPasteRows, err = s.store.PurgeText(ctx, s.clock.Now())
+	return result, err
 }
 
 func (s *Service) issueCredentials(workspaceID, deviceID, role string, now time.Time) ([]CredentialResponse, []CredentialRecord, error) {

@@ -14,6 +14,7 @@ const IdempotencyLifetime = 24 * time.Hour
 const EventLifetime = 35 * 24 * time.Hour
 const PairingMetadataLifetime = 24 * time.Hour
 const RateLimitRetention = 24 * time.Hour
+const TextHistoryWindow = 30 * 24 * time.Hour
 
 var ErrInvalid = errors.New("invalid identity input")
 var ErrUnauthorized = errors.New("unauthorized")
@@ -121,9 +122,66 @@ type RateRule struct {
 }
 
 type CleanupResult struct {
-	RevokedDevices  int64
-	PairingRows     int64
-	IdempotencyRows int64
-	EventRows       int64
-	RateLimitRows   int64
+	RevokedDevices   int64
+	PairingRows      int64
+	IdempotencyRows  int64
+	EventRows        int64
+	RateLimitRows    int64
+	TextRevisionRows int64
+	TextPasteRows    int64
 }
+
+type CreatePasteInput struct {
+	Text string `json:"text"`
+}
+
+type UpdatePasteInput = CreatePasteInput
+
+type TextRevision struct {
+	PasteID        string
+	RevisionID     string
+	WorkspaceID    string
+	RevisionKind   string
+	ServerSequence int64
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
+	Envelope       secure.Envelope
+}
+
+type LatestPaste struct {
+	Available      bool
+	PasteID        string
+	RevisionID     string
+	ServerSequence int64
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
+	Text           string
+	Envelope       secure.Envelope
+}
+
+type SyncEvent struct {
+	WorkspaceID    string
+	Sequence       int64
+	EventType      string
+	PasteID        string
+	RevisionID     string
+	RevisionKind   string
+	ServerSequence int64
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
+	Envelope       secure.Envelope
+}
+
+type SyncResult struct {
+	Cursor  int64
+	HasMore bool
+	Events  []SyncEvent
+}
+
+type SnapshotResult struct {
+	Cursor int64
+	Pastes []LatestPaste
+}
+
+var ErrCursorExpired = errors.New("sync cursor expired")
+var ErrUnavailableContent = errors.New("paste content unavailable")

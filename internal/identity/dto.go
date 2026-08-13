@@ -54,6 +54,41 @@ type ApprovalResponse struct {
 	ClaimExpiresAt time.Time `json:"claim_expires_at"`
 }
 
+type PasteResponse struct {
+	PasteID        string    `json:"paste_id"`
+	RevisionID     string    `json:"revision_id"`
+	Kind           string    `json:"kind"`
+	ServerSequence int64     `json:"server_sequence"`
+	CreatedAt      time.Time `json:"created_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	Deleted        bool      `json:"deleted"`
+	Text           *string   `json:"text,omitempty"`
+}
+
+type SyncEventResponse struct {
+	Sequence       int64     `json:"sequence"`
+	EventType      string    `json:"event_type"`
+	PasteID        string    `json:"paste_id"`
+	RevisionID     string    `json:"revision_id"`
+	Kind           string    `json:"kind"`
+	ServerSequence int64     `json:"server_sequence"`
+	CreatedAt      time.Time `json:"created_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	Deleted        bool      `json:"deleted"`
+	Text           *string   `json:"text,omitempty"`
+}
+
+type SyncResponse struct {
+	Cursor  int64               `json:"cursor"`
+	HasMore bool                `json:"has_more"`
+	Events  []SyncEventResponse `json:"events"`
+}
+
+type SnapshotResponse struct {
+	Cursor int64           `json:"cursor"`
+	Pastes []PasteResponse `json:"pastes"`
+}
+
 func grantDevice(device Device) GrantDevice {
 	return GrantDevice{
 		ID: device.ID, DisplayName: device.DisplayName, Platform: device.Platform, Role: device.Role,

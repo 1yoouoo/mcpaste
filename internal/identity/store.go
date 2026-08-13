@@ -12,6 +12,7 @@ type Store interface {
 	Authenticate(context.Context, string, string, []byte, time.Time) (Principal, error)
 	ConsumeRateLimit(context.Context, RateRule, []byte, time.Time) (RateDecision, error)
 	Cleanup(context.Context, time.Time) (CleanupResult, error)
+	PurgeText(context.Context, time.Time) (int64, int64, error)
 }
 
 type TxStore interface {
@@ -35,4 +36,10 @@ type TxStore interface {
 	RenameDevice(context.Context, string, string, string, time.Time) (Device, error)
 	RevokeDevice(context.Context, string, string, time.Time) error
 	InsertEvent(context.Context, string, string, string, time.Time) error
+	InsertPaste(context.Context, string, string, time.Time) error
+	AppendTextRevision(context.Context, string, string, string, string, string, secure.Envelope, time.Time, time.Time) (TextRevision, error)
+	ListPastes(context.Context, string, time.Time, time.Time) ([]TextRevision, error)
+	Sync(context.Context, string, int64, int, time.Time) (SyncResult, error)
+	LatestPaste(context.Context, string, time.Time) (LatestPaste, error)
+	TouchPaste(context.Context, string, string, time.Time) error
 }
