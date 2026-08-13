@@ -7,18 +7,31 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/1yoouoo/mcpaste/internal/secure"
 )
 
 type Service struct {
-	store   Store
-	keyring *secure.Keyring
-	random  secure.Random
-	clock   Clock
+	store           Store
+	keyring         *secure.Keyring
+	random          secure.Random
+	clock           Clock
+	idempotencyGate idempotencyGate
+}
+
+type idempotencyGate struct {
+	mu      sync.Mutex
+	entries map[[sha256.Size]byte]*idempotencyGateEntry
+}
+
+type idempotencyGateEntry struct {
+	token      chan struct{}
+	references int
 }
 
 type CreateWorkspaceInput struct {
@@ -63,6 +76,11 @@ func (s *Service) CreateWorkspace(ctx context.Context, clientIP, idempotencyKey 
 	}
 	input.DeviceName = name
 	canonical, _ := json.Marshal(input)
+	release, err := s.idempotencyGate.acquire(ctx, publicIdempotencyScope, "workspace.create", idempotencyKey)
+	if err != nil {
+		return Result{}, err
+	}
+	defer release()
 	if replay, found, err := s.preflight(ctx, publicIdempotencyScope, "workspace.create", idempotencyKey, "", canonical); err != nil || found {
 		return replay, err
 	}
@@ -118,6 +136,11 @@ func (s *Service) CreatePairing(ctx context.Context, clientIP, idempotencyKey st
 	}
 	input.ProposedName = name
 	canonical, _ := json.Marshal(input)
+	release, err := s.idempotencyGate.acquire(ctx, publicIdempotencyScope, "pairing.create", idempotencyKey)
+	if err != nil {
+		return Result{}, err
+	}
+	defer release()
 	if replay, found, err := s.preflight(ctx, publicIdempotencyScope, "pairing.create", idempotencyKey, "", canonical); err != nil || found {
 		return replay, err
 	}
@@ -360,13 +383,18 @@ func (s *Service) Recover(ctx context.Context, clientIP, idempotencyKey string, 
 	if err != nil {
 		return Result{}, ErrInvalidRecovery
 	}
+	input.DeviceName = name
+	canonical, _ := json.Marshal(input)
+	release, err := s.idempotencyGate.acquire(ctx, workspaceID, "recovery", idempotencyKey)
+	if err != nil {
+		return Result{}, err
+	}
+	defer release()
 	permit, err := secure.AcquireRecoveryPermit(ctx)
 	if err != nil {
 		return Result{}, err
 	}
 	defer permit.Release()
-	input.DeviceName = name
-	canonical, _ := json.Marshal(input)
 	if replay, found, err := s.preflight(ctx, workspaceID, "recovery", idempotencyKey, workspaceID, canonical); err != nil || found {
 		return replay, err
 	}
@@ -543,6 +571,54 @@ func (s *Service) limit(ctx context.Context, rule RateRule, subject string) erro
 	return nil
 }
 
+func (g *idempotencyGate) acquire(ctx context.Context, scopeID, operation, key string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256([]byte("mcpaste-idempotency-gate-v1\x00" + scopeID + "\x00" + operation + "\x00" + key))
+	g.mu.Lock()
+	if g.entries == nil {
+		g.entries = make(map[[sha256.Size]byte]*idempotencyGateEntry)
+	}
+	entry := g.entries[digest]
+	if entry == nil {
+		entry = &idempotencyGateEntry{token: make(chan struct{}, 1)}
+		entry.token <- struct{}{}
+		g.entries[digest] = entry
+	}
+	entry.references++
+	g.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		g.dropReference(digest, entry)
+		return nil, ctx.Err()
+	case <-entry.token:
+		if err := ctx.Err(); err != nil {
+			entry.token <- struct{}{}
+			g.dropReference(digest, entry)
+			return nil, err
+		}
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			entry.token <- struct{}{}
+			g.dropReference(digest, entry)
+		})
+	}, nil
+}
+
+func (g *idempotencyGate) dropReference(digest [sha256.Size]byte, entry *idempotencyGateEntry) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	entry.references--
+	if entry.references == 0 && g.entries[digest] == entry {
+		delete(g.entries, digest)
+	}
+}
+
 type RateLimitError struct{ RetryAfter time.Duration }
 
 func (e *RateLimitError) Error() string { return ErrRateLimited.Error() }
@@ -600,8 +676,8 @@ func (s *Service) newShortCode() (string, error) {
 	const accepted = 248
 	var builder strings.Builder
 	for builder.Len() < 8 {
-		buffer := make([]byte, 1)
-		if _, err := s.random.Read(buffer); err != nil {
+		var buffer [1]byte
+		if _, err := io.ReadFull(s.random, buffer[:]); err != nil {
 			return "", err
 		}
 		if int(buffer[0]) >= accepted {

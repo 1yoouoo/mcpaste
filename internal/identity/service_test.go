@@ -31,6 +31,81 @@ func (r *countingReader) Read(target []byte) (int, error) {
 	return len(target), nil
 }
 
+type nilErrorShortReader struct {
+	shortRead bool
+}
+
+func (r *nilErrorShortReader) Read(target []byte) (int, error) {
+	if len(target) == 1 && !r.shortRead {
+		r.shortRead = true
+		return 0, nil
+	}
+	for index := range target {
+		target[index] = 1
+	}
+	return len(target), nil
+}
+
+type idempotencyOverlapStore struct {
+	identity.Store
+	firstLocked chan struct{}
+	secondRate  chan struct{}
+	release     chan struct{}
+	lockCalls   atomic.Int32
+	rateCalls   atomic.Int32
+}
+
+type idempotencyOverlapTx struct {
+	identity.TxStore
+	store *idempotencyOverlapStore
+}
+
+func newIdempotencyOverlapStore(store identity.Store) *idempotencyOverlapStore {
+	return &idempotencyOverlapStore{
+		Store:       store,
+		firstLocked: make(chan struct{}),
+		secondRate:  make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+}
+
+func (s *idempotencyOverlapStore) WithinTx(ctx context.Context, fn func(identity.TxStore) error) error {
+	return s.Store.WithinTx(ctx, func(tx identity.TxStore) error {
+		return fn(&idempotencyOverlapTx{TxStore: tx, store: s})
+	})
+}
+
+func (s *idempotencyOverlapStore) ConsumeRateLimit(ctx context.Context, rule identity.RateRule, subject []byte, now time.Time) (identity.RateDecision, error) {
+	if s.rateCalls.Add(1) == 2 {
+		close(s.secondRate)
+	}
+	return s.Store.ConsumeRateLimit(ctx, rule, subject, now)
+}
+
+func (tx *idempotencyOverlapTx) LockIdempotency(ctx context.Context, scopeID, operation string, keyHash []byte) error {
+	if err := tx.TxStore.LockIdempotency(ctx, scopeID, operation, keyHash); err != nil {
+		return err
+	}
+	if tx.store.lockCalls.Add(1) == 1 {
+		close(tx.store.firstLocked)
+		<-tx.store.release
+	}
+	return nil
+}
+
+type serviceCall struct {
+	result identity.Result
+	err    error
+}
+
+func releaseOverlappingMutation(store *idempotencyOverlapStore) {
+	select {
+	case <-store.secondRate:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(store.release)
+}
+
 type shortCodeGuardStore struct {
 	identity.Store
 	tx            *shortCodeGuardTx
@@ -181,6 +256,51 @@ where workspace_id = $1::uuid and octet_length(secret_hash) = 32`, grant.Workspa
 	}
 }
 
+func TestConcurrentCreateWorkspaceReplayConsumesOneRateLimitCount(t *testing.T) {
+	pool := testdb.New(t)
+	random := secure.SystemRandom{}
+	keyring, err := secure.NewKeyring("test-key", map[string][]byte{"test-key": bytes.Repeat([]byte{0x50}, 32)}, random)
+	if err != nil {
+		t.Fatal("NewKeyring() failed")
+	}
+	store := newIdempotencyOverlapStore(identitypostgres.New(pool))
+	service := identity.NewService(store, keyring, random, fixedClock{value: time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)})
+	key := "00000000-0000-4000-8000-000000000950"
+	input := identity.CreateWorkspaceInput{DeviceName: "Concurrent Workspace", Platform: "macos"}
+
+	results := make(chan serviceCall, 2)
+	invoke := func() {
+		result, callErr := service.CreateWorkspace(context.Background(), "192.0.2.50", key, input)
+		results <- serviceCall{result: result, err: callErr}
+	}
+	go invoke()
+	select {
+	case <-store.firstLocked:
+	case <-time.After(10 * time.Second):
+		close(store.release)
+		t.Fatal("first workspace request did not reach the idempotency lock")
+	}
+	go invoke()
+	releaseOverlappingMutation(store)
+
+	first := <-results
+	second := <-results
+	if first.err != nil || second.err != nil {
+		t.Fatal("concurrent workspace create failed")
+	}
+	if first.result.Status != 201 || second.result.Status != 201 || !bytes.Equal(first.result.Body, second.result.Body) {
+		t.Fatal("concurrent workspace responses were not byte-identical replays")
+	}
+	var count int
+	if err := pool.QueryRow(context.Background(), `
+select coalesce(sum(request_count), 0) from rate_limit_buckets where scope = 'workspace.create'`).Scan(&count); err != nil {
+		t.Fatal("count workspace rate-limit bucket failed")
+	}
+	if count != 1 {
+		t.Fatalf("workspace rate-limit count = %d, want 1", count)
+	}
+}
+
 func TestCreateWorkspaceBuildsRecoveryBeforeMutationTransaction(t *testing.T) {
 	store := &recoveryPrecomputeStore{tx: &recoveryPrecomputeTx{}}
 	random := &blockingRecoveryReader{started: make(chan struct{}), release: make(chan struct{})}
@@ -312,6 +432,138 @@ select count(*) from idempotency_records where scope_id = 'public' and operation
 	}
 	if workspaces != 2 || idempotencyRows != 1 {
 		t.Fatalf("workspace/idempotency rows = %d/%d", workspaces, idempotencyRows)
+	}
+}
+
+func TestConcurrentCreatePairingReplayConsumesOneRateLimitCount(t *testing.T) {
+	pool := testdb.New(t)
+	random := secure.SystemRandom{}
+	keyring, err := secure.NewKeyring("test-key", map[string][]byte{"test-key": bytes.Repeat([]byte{0x51}, 32)}, random)
+	if err != nil {
+		t.Fatal("NewKeyring() failed")
+	}
+	store := newIdempotencyOverlapStore(identitypostgres.New(pool))
+	service := identity.NewService(store, keyring, random, fixedClock{value: time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)})
+	key := "00000000-0000-4000-8000-000000000951"
+	input := identity.CreatePairingInput{ProposedName: "Concurrent Pairing", Platform: "linux", RequestedScope: "connector"}
+
+	results := make(chan serviceCall, 2)
+	invoke := func() {
+		result, callErr := service.CreatePairing(context.Background(), "192.0.2.51", key, input)
+		results <- serviceCall{result: result, err: callErr}
+	}
+	go invoke()
+	select {
+	case <-store.firstLocked:
+	case <-time.After(10 * time.Second):
+		close(store.release)
+		t.Fatal("first pairing request did not reach the idempotency lock")
+	}
+	go invoke()
+	releaseOverlappingMutation(store)
+
+	first := <-results
+	second := <-results
+	if first.err != nil || second.err != nil {
+		t.Fatal("concurrent pairing create failed")
+	}
+	if first.result.Status != 201 || second.result.Status != 201 || !bytes.Equal(first.result.Body, second.result.Body) {
+		t.Fatal("concurrent pairing responses were not byte-identical replays")
+	}
+	var count int
+	if err := pool.QueryRow(context.Background(), `
+select coalesce(sum(request_count), 0) from rate_limit_buckets where scope = 'pairing.create'`).Scan(&count); err != nil {
+		t.Fatal("count pairing rate-limit bucket failed")
+	}
+	if count != 1 {
+		t.Fatalf("pairing rate-limit count = %d, want 1", count)
+	}
+	if calls := store.rateCalls.Load(); calls != 1 {
+		t.Fatalf("pairing rate-limit calls = %d, want 1", calls)
+	}
+}
+
+func TestCanceledCreatePairingWaiterDoesNotConsumeRateLimit(t *testing.T) {
+	pool := testdb.New(t)
+	random := secure.SystemRandom{}
+	keyring, err := secure.NewKeyring("test-key", map[string][]byte{"test-key": bytes.Repeat([]byte{0x53}, 32)}, random)
+	if err != nil {
+		t.Fatal("NewKeyring() failed")
+	}
+	store := newIdempotencyOverlapStore(identitypostgres.New(pool))
+	service := identity.NewService(store, keyring, random, fixedClock{value: time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)})
+	key := "00000000-0000-4000-8000-000000000953"
+	input := identity.CreatePairingInput{ProposedName: "Canceled Pairing", Platform: "linux", RequestedScope: "connector"}
+
+	firstResult := make(chan serviceCall, 1)
+	go func() {
+		result, callErr := service.CreatePairing(context.Background(), "192.0.2.53", key, input)
+		firstResult <- serviceCall{result: result, err: callErr}
+	}()
+	select {
+	case <-store.firstLocked:
+	case <-time.After(10 * time.Second):
+		close(store.release)
+		t.Fatal("first pairing request did not reach the idempotency lock")
+	}
+
+	waiterContext, cancelWaiter := context.WithCancel(context.Background())
+	waiterResult := make(chan error, 1)
+	go func() {
+		_, callErr := service.CreatePairing(waiterContext, "192.0.2.53", key, input)
+		waiterResult <- callErr
+	}()
+	select {
+	case <-store.secondRate:
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancelWaiter()
+	if err := <-waiterResult; !errors.Is(err, context.Canceled) {
+		close(store.release)
+		t.Fatal("canceled pairing waiter did not return context cancellation")
+	}
+	close(store.release)
+	if completed := <-firstResult; completed.err != nil || completed.result.Status != 201 {
+		t.Fatal("first pairing request failed")
+	}
+
+	var count int
+	if err := pool.QueryRow(context.Background(), `
+select coalesce(sum(request_count), 0) from rate_limit_buckets where scope = 'pairing.create'`).Scan(&count); err != nil {
+		t.Fatal("count pairing rate-limit bucket failed")
+	}
+	if count != 1 {
+		t.Fatalf("pairing rate-limit count = %d, want 1", count)
+	}
+	if calls := store.rateCalls.Load(); calls != 1 {
+		t.Fatalf("pairing rate-limit calls = %d, want 1", calls)
+	}
+}
+
+func TestCreatePairingShortCodeDoesNotAcceptNilErrorShortRead(t *testing.T) {
+	pool := testdb.New(t)
+	random := &nilErrorShortReader{}
+	keyring, err := secure.NewKeyring("test-key", map[string][]byte{"test-key": bytes.Repeat([]byte{0x52}, 32)}, random)
+	if err != nil {
+		t.Fatal("NewKeyring() failed")
+	}
+	service := identity.NewService(
+		identitypostgres.New(pool), keyring, random,
+		fixedClock{value: time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)},
+	)
+	result, err := service.CreatePairing(
+		context.Background(), "192.0.2.52", "00000000-0000-4000-8000-000000000952",
+		identity.CreatePairingInput{ProposedName: "Short Read", Platform: "linux", RequestedScope: "connector"},
+	)
+	if err != nil {
+		t.Fatal("CreatePairing() failed")
+	}
+	var response identity.PairingCreateResponse
+	if err := json.Unmarshal(result.Body, &response); err != nil {
+		t.Fatal("unmarshal pairing response failed")
+	}
+	if response.ShortCode != "33333333" {
+		t.Fatalf("short code = %q, want %q", response.ShortCode, "33333333")
 	}
 }
 
