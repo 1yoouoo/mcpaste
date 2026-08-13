@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
 )
 
 const nonceSize = 12
+const associatedDataVersion byte = 1
+const associatedDataDomain = "mcpaste-envelope"
 
 type Envelope struct {
 	KeyID      string
@@ -110,7 +113,18 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 }
 
 func associatedData(keyID, purpose, objectID string) []byte {
-	return []byte("mcpaste:v1:" + keyID + ":" + purpose + ":" + objectID)
+	fields := [...]string{associatedDataDomain, keyID, purpose, objectID}
+	size := 1
+	for _, field := range fields {
+		size += 8 + len(field)
+	}
+	framed := make([]byte, 1, size)
+	framed[0] = associatedDataVersion
+	for _, field := range fields {
+		framed = binary.BigEndian.AppendUint64(framed, uint64(len(field)))
+		framed = append(framed, field...)
+	}
+	return framed
 }
 
 func validKeyID(value string) bool {

@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
-	"strings"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -78,17 +77,11 @@ func NewRecoveryWithPermit(ctx context.Context, permit *RecoveryPermit, workspac
 }
 
 func RecoveryLocator(code string) (string, string, error) {
-	parts := strings.Split(code, ".")
-	if len(parts) != 4 || parts[0] != "mcr1" || !validUUID(parts[1]) {
+	parsed, err := parseRecoveryCode(code)
+	if err != nil {
 		return "", "", ErrInvalidRecovery
 	}
-	if _, err := decodeCanonicalRawURL(parts[2], 16); err != nil {
-		return "", "", ErrInvalidRecovery
-	}
-	if _, err := decodeCanonicalRawURL(parts[3], 32); err != nil {
-		return "", "", ErrInvalidRecovery
-	}
-	return parts[1], parts[2], nil
+	return parsed.workspaceID, parsed.locator, nil
 }
 
 func VerifyRecovery(ctx context.Context, code, workspaceID, locator string, verifier RecoveryVerifier) error {
@@ -104,19 +97,14 @@ func VerifyRecoveryWithPermit(ctx context.Context, permit *RecoveryPermit, code,
 	if permit == nil || permit.state == nil || permit.state.limiter != processArgon2Limiter {
 		return errInvalidRecoveryPermit
 	}
-	parsedWorkspace, parsedLocator, err := RecoveryLocator(code)
-	if err != nil || parsedWorkspace != workspaceID || parsedLocator != locator {
+	parsed, err := parseRecoveryCode(code)
+	if err != nil || parsed.workspaceID != workspaceID || parsed.locator != locator {
 		return ErrInvalidRecovery
 	}
 	if verifier.Version != argon2.Version || verifier.Time != recoveryTime || verifier.MemoryKiB != recoveryMemoryKiB || verifier.Threads != recoveryThreads || len(verifier.Salt) != 16 || len(verifier.Hash) != 32 {
 		return ErrInvalidRecovery
 	}
-	secretText := strings.Split(code, ".")[3]
-	secret, err := decodeCanonicalRawURL(secretText, 32)
-	if err != nil {
-		return ErrInvalidRecovery
-	}
-	actual, err := recoveryKeyWithPermit(ctx, permit, secret, verifier.Salt, verifier.Time, verifier.MemoryKiB, verifier.Threads, uint32(len(verifier.Hash)))
+	actual, err := recoveryKeyWithPermit(ctx, permit, parsed.secret, verifier.Salt, verifier.Time, verifier.MemoryKiB, verifier.Threads, uint32(len(verifier.Hash)))
 	if err != nil {
 		return err
 	}
@@ -124,4 +112,25 @@ func VerifyRecoveryWithPermit(ctx context.Context, permit *RecoveryPermit, code,
 		return ErrInvalidRecovery
 	}
 	return nil
+}
+
+type parsedRecoveryCode struct {
+	workspaceID string
+	locator     string
+	secret      []byte
+}
+
+func parseRecoveryCode(code string) (parsedRecoveryCode, error) {
+	parts, ok := cutCanonicalSecretFormat(code)
+	if !ok || parts[0] != "mcr1" || !validUUID(parts[1]) {
+		return parsedRecoveryCode{}, ErrInvalidRecovery
+	}
+	if _, err := decodeCanonicalRawURL(parts[2], 16); err != nil {
+		return parsedRecoveryCode{}, ErrInvalidRecovery
+	}
+	secret, err := decodeCanonicalRawURL(parts[3], 32)
+	if err != nil {
+		return parsedRecoveryCode{}, ErrInvalidRecovery
+	}
+	return parsedRecoveryCode{workspaceID: parts[1], locator: parts[2], secret: secret}, nil
 }

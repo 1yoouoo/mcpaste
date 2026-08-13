@@ -95,12 +95,33 @@ func TestRecoveryRejectsMalformedCodesGenerically(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsOversizedDotHeavyInputWithinBoundedAllocation(t *testing.T) {
+	malformed := strings.Repeat(".", 64*1024)
+	if _, _, err := RecoveryLocator(malformed); !errors.Is(err, ErrInvalidRecovery) {
+		t.Fatal("RecoveryLocator did not return generic invalid-recovery error")
+	}
+	if err := VerifyRecovery(context.Background(), malformed, testWorkspaceID, strings.Repeat("A", 22), RecoveryVerifier{}); !errors.Is(err, ErrInvalidRecovery) {
+		t.Fatal("VerifyRecovery did not return generic invalid-recovery error")
+	}
+	result := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			_, _, _ = RecoveryLocator(malformed)
+		}
+	})
+	if allocated := result.AllocedBytesPerOp(); allocated > 1024 {
+		t.Fatalf("RecoveryLocator allocated %d bytes per oversized input", allocated)
+	}
+}
+
 func TestNewRecoveryHonorsCanceledContextBeforeArgon2(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	randomInput := bytes.NewReader(bytes.Repeat([]byte{0x91}, 64))
 	if _, err := NewRecovery(ctx, testWorkspaceID, randomInput); !errors.Is(err, context.Canceled) {
 		t.Fatal("NewRecovery() did not return context cancellation")
+	}
+	if _, err := NewRecovery(ctx, testWorkspaceID, nil); !errors.Is(err, context.Canceled) {
+		t.Fatal("NewRecovery() did not prioritize context cancellation")
 	}
 }
 

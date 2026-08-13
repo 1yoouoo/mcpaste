@@ -60,6 +60,21 @@ func TestCredentialRejectsMalformedValues(t *testing.T) {
 	}
 }
 
+func TestCredentialRejectsOversizedDotHeavyInputWithinBoundedAllocation(t *testing.T) {
+	malformed := strings.Repeat(".", 64*1024)
+	if _, err := ParseCredential(malformed); err == nil || err.Error() != "credential is invalid" {
+		t.Fatal("ParseCredential did not return a generic credential error")
+	}
+	result := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			_, _ = ParseCredential(malformed)
+		}
+	})
+	if allocated := result.AllocedBytesPerOp(); allocated > 1024 {
+		t.Fatalf("ParseCredential allocated %d bytes per oversized input", allocated)
+	}
+}
+
 func TestClaimSecretUses256BitsAndStableHash(t *testing.T) {
 	secret, hash, err := NewClaimSecret(bytes.NewReader(bytes.Repeat([]byte{0x73}, 32)))
 	if err != nil {

@@ -68,6 +68,24 @@ func TestEnvelopeRejectsTamperWrongContextAndUnknownKey(t *testing.T) {
 	}
 }
 
+func TestEnvelopeAssociatedDataRejectsTupleCollision(t *testing.T) {
+	keyring, err := NewKeyring(
+		"test-key",
+		map[string][]byte{"test-key": bytes.Repeat([]byte{0x63}, 32)},
+		bytes.NewReader(bytes.Repeat([]byte{0x64}, 12)),
+	)
+	if err != nil {
+		t.Fatal("NewKeyring failed")
+	}
+	envelope, err := keyring.Encrypt("a:b", "c", []byte("tuple-marker"))
+	if err != nil {
+		t.Fatal("Encrypt failed")
+	}
+	if _, err := keyring.Decrypt("a", "b:c", envelope); err == nil {
+		t.Fatal("colliding purpose and object tuple decrypted")
+	}
+}
+
 func TestParseKeyringRejectsInvalidConfiguration(t *testing.T) {
 	canonical := strings.Repeat("A", 43)
 	tests := []struct {

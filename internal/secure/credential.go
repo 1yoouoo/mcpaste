@@ -10,6 +10,7 @@ import (
 
 const credentialDomain = "mcpaste-credential-v1"
 const claimDomain = "mcpaste-pairing-claim-v1"
+const canonicalSecretFormatLength = 108
 
 type IssuedCredential struct {
 	Kind    string
@@ -42,8 +43,8 @@ func NewCredential(workspaceID, kind string, random Random) (IssuedCredential, e
 }
 
 func ParseCredential(token string) (ParsedCredential, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 4 || parts[0] != "mcp1" || !validUUID(parts[1]) {
+	parts, ok := cutCanonicalSecretFormat(token)
+	if !ok || parts[0] != "mcp1" || !validUUID(parts[1]) {
 		return ParsedCredential{}, errors.New("credential is invalid")
 	}
 	if _, err := decodeCanonicalRawURL(parts[2], 16); err != nil {
@@ -54,6 +55,27 @@ func ParseCredential(token string) (ParsedCredential, error) {
 		return ParsedCredential{}, errors.New("credential is invalid")
 	}
 	return ParsedCredential{WorkspaceID: parts[1], Locator: parts[2], Hash: hashSecret(credentialDomain, secret)}, nil
+}
+
+func cutCanonicalSecretFormat(value string) ([4]string, bool) {
+	var parts [4]string
+	if len(value) != canonicalSecretFormatLength {
+		return parts, false
+	}
+	remainder := value
+	for index := 0; index < len(parts)-1; index++ {
+		part, rest, ok := strings.Cut(remainder, ".")
+		if !ok {
+			return parts, false
+		}
+		parts[index] = part
+		remainder = rest
+	}
+	if _, _, ok := strings.Cut(remainder, "."); ok {
+		return parts, false
+	}
+	parts[len(parts)-1] = remainder
+	return parts, true
 }
 
 func NewClaimSecret(random Random) (string, []byte, error) {
