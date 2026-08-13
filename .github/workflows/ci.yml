@@ -17,7 +17,24 @@ jobs:
   go:
     name: Go checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+        env:
+          POSTGRES_DB: mcpaste
+          POSTGRES_USER: mcpaste
+          POSTGRES_PASSWORD: mcpaste-ci-only-not-production
+        ports:
+          - 55439:5432
+        options: >-
+          --health-cmd "pg_isready -U mcpaste -d mcpaste"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      MCPASTE_DATABASE_URL: postgres://mcpaste:mcpaste-ci-only-not-production@127.0.0.1:55439/mcpaste?sslmode=disable
+      MCPASTE_TEST_DATABASE_URL: postgres://mcpaste:mcpaste-ci-only-not-production@127.0.0.1:55439/mcpaste?sslmode=disable
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -30,20 +47,32 @@ jobs:
           go-version-file: .go-version
           cache: false
 
+      - name: Verify module graph
+        run: |
+          go mod tidy -diff
+          go mod verify
+
+      - name: Verify migrations
+        run: |
+          GOFLAGS=-mod=readonly go run ./cmd/migrate up
+          GOFLAGS=-mod=readonly go run ./cmd/migrate verify
+
       - name: Check formatting
-        run: test -z "$(find cmd internal -type f -name '*.go' -exec gofmt -l {} +)"
+        run: test -z "$(find cmd internal db -type f -name '*.go' -exec gofmt -l {} +)"
 
       - name: Vet
-        run: go vet ./...
+        run: GOFLAGS=-mod=readonly go vet ./cmd/migrate ./cmd/server ./db/migrations ./internal/config ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/secure ./internal/testdb
 
-      - name: Test with race detector
-        run: go test -race -coverprofile=coverage.out ./...
+      - name: Test with race detector and PostgreSQL
+        run: GOFLAGS=-mod=readonly go test -race -coverprofile=coverage.out ./cmd/migrate ./cmd/server ./db/migrations ./internal/config ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/secure ./internal/testdb
 
-      - name: Build server
-        run: go build -o /tmp/mcpaste-server ./cmd/server
+      - name: Build server and migration command
+        run: |
+          GOFLAGS=-mod=readonly go build -o /tmp/mcpaste-server ./cmd/server
+          GOFLAGS=-mod=readonly go build -o /tmp/mcpaste-migrate ./cmd/migrate
 
       - name: Check known Go vulnerabilities
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+        run: GOFLAGS=-mod=readonly go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./cmd/migrate ./cmd/server ./db/migrations ./internal/config ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/secure ./internal/testdb
 
   container:
     name: Container build
@@ -57,6 +86,9 @@ jobs:
 
       - name: Build server image
         run: docker build -t mcpaste-server:ci .
+
+      - name: Inspect non-root default
+        run: test "$(docker image inspect mcpaste-server:ci --format '{{.Config.User}}')" = "65532:65532"
 
   secrets:
     name: Secret scan
@@ -77,5 +109,28 @@ jobs:
           echo "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c  /tmp/gitleaks.tar.gz" | sha256sum --check
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
 
+      - name: Reject obvious secret patterns without disclosure
+        run: |
+          if rg --quiet --hidden \
+            --glob '!.git/**' \
+            --glob '!.github/workflows/ci.yml' \
+            --glob '!docs/security-and-secrets.md' \
+            --glob '!docs/superpowers/plans/**' \
+            '(sk-[A-Za-z0-9]{12,}|ghp_[A-Za-z0-9]{12,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' .
+          then
+            printf '%s\n' 'Potential secret pattern detected.' >&2
+            exit 1
+          else
+            secret_pattern_status=$?
+            if [ "$secret_pattern_status" -ne 1 ]; then
+              printf '%s\n' 'Secret-pattern scan failed.' >&2
+              exit 1
+            fi
+          fi
+
       - name: Scan repository
-        run: /tmp/gitleaks detect --source . --redact --verbose
+        run: |
+          if ! /tmp/gitleaks detect --source . --redact >/tmp/gitleaks-result 2>&1; then
+            printf '%s\n' 'Gitleaks detected a secret or failed to scan.' >&2
+            exit 1
+          fi
