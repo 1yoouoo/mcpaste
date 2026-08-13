@@ -26,7 +26,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: ${{ inputs.tag }}
+          ref: refs/tags/${{ inputs.tag }}
           persist-credentials: false
       - name: Select Xcode
         run: sudo xcode-select --switch /Applications/Xcode_15.4.app
@@ -64,7 +64,7 @@ jobs:
           xcrun stapler staple "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/MCPaste-final.zip"
-          shasum -a 256 "$RUNNER_TEMP/MCPaste-final.zip" > "$RUNNER_TEMP/macOS-SHA256SUMS"
+          (cd "$RUNNER_TEMP" && shasum -a 256 MCPaste-final.zip > macOS-SHA256SUMS)
           cp "$GITHUB_WORKSPACE/THIRD_PARTY_NOTICES.md" "$RUNNER_TEMP/THIRD_PARTY_NOTICES.md"
       - name: Publish macOS artifact
         env:
@@ -75,6 +75,8 @@ jobs:
             v*) ;;
             *) printf '%s\n' 'macOS release requires a v* tag.' >&2; exit 1 ;;
           esac
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
           gh release view "$RELEASE_TAG" >/dev/null
           gh release upload "$RELEASE_TAG" --clobber \
             "$RUNNER_TEMP/MCPaste-final.zip" \

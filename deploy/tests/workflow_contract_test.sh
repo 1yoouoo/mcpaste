@@ -20,5 +20,8 @@ grep -Eq 'APPLE_NOTARIZATION_APPLE_ID' "$root/.github/workflows/macos-release.ym
 grep -Eq '^  workflow_call:' "$root/.github/workflows/macos-release.yml"
 grep -Eq '^      tag:' "$root/.github/workflows/macos-release.yml"
 grep -Eq 'gh release upload .*--clobber' "$root/.github/workflows/macos-release.yml"
+grep -Eq 'refs/tags/\$\{\{ inputs.tag \}\}' "$root/.github/workflows/macos-release.yml"
+grep -Eq 'git check-ref-format' "$root/.github/workflows/macos-release.yml"
+grep -Eq 'MCPaste-final.zip > macOS-SHA256SUMS' "$root/.github/workflows/macos-release.yml"
 grep -Eq '^    needs: linux$' "$root/.github/workflows/release.yml"
 grep -Eq 'uses: \.\/\.github\/workflows\/macos-release\.yml' "$root/.github/workflows/release.yml"

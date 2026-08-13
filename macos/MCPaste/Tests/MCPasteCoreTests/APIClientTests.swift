@@ -87,6 +87,7 @@ final class APIClientTests: XCTestCase {
             return ids
         }
         try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(server.request.hasPrefix("GET /v1/events?after=17 HTTP/1.1"))
         reader.cancel()
 
         let ids = await reader.value
@@ -189,8 +190,15 @@ private final class EventStreamHTTPServer {
                     guard let self else { return }
                     self.request = String(decoding: data ?? Data(), as: UTF8.self)
                     let reason = self.statusCode == 200 ? "OK" : "Gone"
-                    let headers = "HTTP/1.1 \(self.statusCode) \(reason)\r\nContent-Type: text/event-stream\r\nContent-Length: \(self.payload.count)\r\nConnection: close\r\n\r\n"
-                    let body = self.closeAfterResponse ? self.payload : Data()
+                    let headers: String
+                    let body: Data
+                    if self.closeAfterResponse {
+                        headers = "HTTP/1.1 \(self.statusCode) \(reason)\r\nContent-Type: text/event-stream\r\nContent-Length: \(self.payload.count)\r\nConnection: close\r\n\r\n"
+                        body = self.payload
+                    } else {
+                        headers = "HTTP/1.1 \(self.statusCode) \(reason)\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
+                        body = Data("id: 18\n".utf8)
+                    }
                     connection.send(content: Data(headers.utf8) + body, completion: .contentProcessed { _ in
                         if self.closeAfterResponse {
                             connection.cancel()

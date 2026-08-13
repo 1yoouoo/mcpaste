@@ -19,6 +19,7 @@ The macOS release workflow runs Swift tests, archives with Developer ID signing,
 codesign --verify --deep --strict --verbose=2 /Applications/MCPaste.app
 spctl --assess --type execute --verbose=4 /Applications/MCPaste.app
 shasum -a 256 MCPaste-final.zip
+shasum -a 256 --check macOS-SHA256SUMS
 ```
 
 The macOS release also publishes `macOS-SHA256SUMS` and `THIRD_PARTY_NOTICES.md`.
