@@ -6,7 +6,7 @@ This runbook describes the approved single-host topology: Caddy is public on por
 
 - Ubuntu host with Docker Engine and Compose v2, a reserved public address, and a firewall allowing only TCP 80 and 443.
 - A DNS A/AAAA record for the production hostname, with the hostname used as `MCPASTE_DOMAIN`.
-- A protected GitHub `production` environment containing deploy host, user, SSH key, known-hosts, and health endpoint values.
+- A protected GitHub `production` environment containing the deploy host, user, SSH key, known-hosts, health endpoint, and MCP connector smoke token (`MCPASTE_SMOKE_TOKEN`) values.
 - `/etc/mcpaste/server.env`, owned by `root:root`, mode `0600`, populated from `deploy/server.env.example` with a random database password and 32-byte raw URL-base64 AES key.
 - `/etc/mcpaste/deploy.env`, mode `0600`, containing only immutable `MCPASTE_IMAGE` and `MCPASTE_DOMAIN` values for Compose interpolation.
 
