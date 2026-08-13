@@ -29,7 +29,9 @@ jobs:
             GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "dist/mcpaste-server-$arch" ./cmd/server
             GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "dist/mcpaste-migrate-$arch" ./cmd/migrate
           done
-          (cd dist && shasum -a 256 * > SHA256SUMS)
+          go run github.com/google/go-licenses@v1.6.0 save ./... --ignore github.com/1yoouoo/mcpaste --save_path "$RUNNER_TEMP/THIRD_PARTY_LICENSES"
+          tar -czf dist/THIRD_PARTY_LICENSES.tar.gz -C "$RUNNER_TEMP" THIRD_PARTY_LICENSES
+          (cd dist && shasum -a 256 * > Linux-SHA256SUMS)
       - name: Publish verified release
         env:
           GH_TOKEN: ${{ github.token }}

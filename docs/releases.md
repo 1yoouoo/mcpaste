@@ -2,10 +2,10 @@
 
 ## Linux artifacts
 
-Tagged releases build `mcpaste`, `mcpaste-server`, and `mcpaste-migrate` for Linux `amd64` and `arm64`, plus `SHA256SUMS`:
+Tagged releases build `mcpaste`, `mcpaste-server`, and `mcpaste-migrate` for Linux `amd64` and `arm64`, plus `Linux-SHA256SUMS` and a generated `THIRD_PARTY_LICENSES.tar.gz`:
 
 ```sh
-sha256sum --check SHA256SUMS
+sha256sum --check Linux-SHA256SUMS
 file mcpaste-amd64 mcpaste-arm64
 ```
 
@@ -19,6 +19,8 @@ The macOS release workflow runs Swift tests, archives with Developer ID signing,
 codesign --verify --deep --strict --verbose=2 /Applications/MCPaste.app
 spctl --assess --type execute --verbose=4 /Applications/MCPaste.app
 shasum -a 256 MCPaste-final.zip
+
+The macOS release also publishes `macOS-SHA256SUMS` and `THIRD_PARTY_NOTICES.md`.
 ```
 
 Apple Developer membership, a Developer ID identity, notarization credentials, and the protected release environment are owner prerequisites. They are never stored in this repository.

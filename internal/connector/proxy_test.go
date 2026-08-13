@@ -58,3 +58,13 @@ func TestProxyForwardsOnlyLatestPasteWithBearerHeader(t *testing.T) {
 		t.Fatalf("proxy text = %#v", result.Content[0])
 	}
 }
+
+func TestProxyRejectsRedirectsBeforeSendingCredentialToAnotherHost(t *testing.T) {
+	const token = "example-token-not-real"
+	redirect := httptest.NewServer(http.RedirectHandler("https://example.com/v1/mcp", http.StatusTemporaryRedirect))
+	defer redirect.Close()
+	proxy, err := NewProxy(context.Background(), Credential{Endpoint: redirect.URL + "/v1/mcp", Token: token}, redirect.Client())
+	if err == nil || proxy != nil {
+		t.Fatal("NewProxy() unexpectedly followed a redirect")
+	}
+}

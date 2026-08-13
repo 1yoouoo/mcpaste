@@ -69,5 +69,7 @@ public final class WorkspaceSession {
     public func startPolling() { coordinator.startPolling() }
     public func stopPolling() { coordinator.stopPolling() }
 
+    public func currentCursor() -> Int64 { (try? cache.cursor()) ?? 0 }
+
     public func markMCPAccess(at date: Date = Date()) { lastMCPAccessAt = date }
 }

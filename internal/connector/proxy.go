@@ -18,6 +18,9 @@ func NewProxy(ctx context.Context, credential Credential, client *http.Client) (
 	if credential.Endpoint == "" || credential.Token == "" {
 		return nil, errors.New("invalid connector credential")
 	}
+	if err := ValidateEndpoint(credential.Endpoint); err != nil {
+		return nil, err
+	}
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -27,6 +30,9 @@ func NewProxy(ctx context.Context, credential Credential, client *http.Client) (
 		base = http.DefaultTransport
 	}
 	clientCopy.Transport = bearerTransport{base: base, token: credential.Token}
+	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return errors.New("MCP endpoint redirects are not allowed")
+	}
 	remoteClient := mcp.NewClient(&mcp.Implementation{Name: "mcpaste-connector", Version: "0.1.0"}, nil)
 	transport := &mcp.StreamableClientTransport{
 		Endpoint: credential.Endpoint, HTTPClient: &clientCopy, MaxRetries: -1, DisableStandaloneSSE: true,

@@ -80,7 +80,13 @@ func runSetup(ctx context.Context, args []string) error {
 	}
 	apiEndpoint := strings.TrimRight(*endpoint, "/")
 	mcpEndpoint := normalizeMCPEndpoint(apiEndpoint)
+	if err := connector.ValidateEndpoint(mcpEndpoint); err != nil {
+		return err
+	}
 	apiBase := strings.TrimSuffix(mcpEndpoint, "/v1/mcp")
+	apiClient := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return errors.New("MCPaste endpoint redirects are not allowed")
+	}}
 	idempotencyKey, err := secure.NewUUID(secure.SystemRandom{})
 	if err != nil {
 		return errors.New("create pairing request")
@@ -95,7 +101,7 @@ func runSetup(ctx context.Context, args []string) error {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Idempotency-Key", idempotencyKey)
-	response, err := http.DefaultClient.Do(request)
+	response, err := apiClient.Do(request)
 	if err != nil {
 		return errors.New("create pairing request")
 	}
@@ -165,7 +171,9 @@ func claimPairing(ctx context.Context, apiBase string, pairing identity.PairingC
 			return identity.WorkspaceGrant{}, errors.New("claim pairing")
 		}
 		request.Header.Set("Content-Type", "application/json")
-		response, err := http.DefaultClient.Do(request)
+		response, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("MCPaste endpoint redirects are not allowed")
+		}}).Do(request)
 		if err != nil {
 			return identity.WorkspaceGrant{}, errors.New("claim pairing")
 		}

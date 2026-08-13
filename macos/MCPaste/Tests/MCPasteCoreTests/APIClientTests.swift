@@ -26,6 +26,14 @@ final class APIClientTests: XCTestCase {
             XCTAssertFalse(String(describing: error).contains("secret"))
         }
     }
+
+    func testEventStreamRequestUsesCursorAndLastEventID() throws {
+        let client = MCPasteAPI(baseURL: URL(string: "https://example.test")!, token: "token", session: .shared)
+        let stream = client.eventStream(after: 17)
+        _ = stream
+        let request = try client.makeRequest(path: "/v1/events?after=17", body: Optional<String>.none)
+        XCTAssertEqual(request.url?.query, "after=17")
+    }
 }
 
 private final class UnauthorizedURLProtocol: URLProtocol {

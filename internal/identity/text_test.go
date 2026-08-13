@@ -174,7 +174,7 @@ func TestSyncReturnsOrderedEventsAndTombstones(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync() first page error = %v", err)
 	}
-	if first.Cursor != 2 || !first.HasMore || len(first.Events) != 1 || first.Events[0].EventType != "paste.created" || first.Events[0].Text == nil || *first.Events[0].Text != "sync text" {
+	if len(first.Events) != 1 || first.Cursor != first.Events[0].Sequence || !first.HasMore || first.Events[0].EventType != "paste.created" || first.Events[0].Text == nil || *first.Events[0].Text != "sync text" {
 		t.Fatalf("first sync page = %#v", first)
 	}
 	second, err := service.Sync(ctx, principal, first.Events[0].Sequence, 1)

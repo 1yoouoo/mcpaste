@@ -120,7 +120,7 @@ where record.scope_id = expired_idempotency.scope_id
 			return err
 		}
 		result.IdempotencyRows = idempotency.RowsAffected()
-		events, err := tx.Exec(ctx, `
+		eventRows, err := tx.Query(ctx, `
 with expired_events as (
     select workspace_id, sequence
     from workspace_events
@@ -128,15 +128,50 @@ with expired_events as (
     order by expires_at, workspace_id, sequence
     for update skip locked
     limit 100
+), deleted_events as (
+    delete from workspace_events as event
+    using expired_events
+    where event.workspace_id = expired_events.workspace_id
+      and event.sequence = expired_events.sequence
+    returning event.workspace_id, event.sequence
+), floors as (
+    select workspace_id, max(sequence) as sequence, count(*) as event_count
+    from deleted_events
+    group by workspace_id
 )
-delete from workspace_events as event
-using expired_events
-where event.workspace_id = expired_events.workspace_id
-  and event.sequence = expired_events.sequence`, now)
+select workspace_id::text, sequence, event_count from floors`, now)
 		if err != nil {
 			return err
 		}
-		result.EventRows = events.RowsAffected()
+		type eventFloor struct {
+			workspaceID string
+			floor       int64
+			count       int64
+		}
+		floors := make([]eventFloor, 0)
+		for eventRows.Next() {
+			var workspaceID string
+			var floor, count int64
+			if err := eventRows.Scan(&workspaceID, &floor, &count); err != nil {
+				eventRows.Close()
+				return err
+			}
+			floors = append(floors, eventFloor{workspaceID: workspaceID, floor: floor, count: count})
+		}
+		if err := eventRows.Err(); err != nil {
+			eventRows.Close()
+			return err
+		}
+		eventRows.Close()
+		for _, floor := range floors {
+			if _, err := tx.Exec(ctx, `
+update workspaces
+set event_retention_floor = greatest(event_retention_floor, $2)
+where id = $1::uuid`, floor.workspaceID, floor.floor); err != nil {
+				return err
+			}
+			result.EventRows += floor.count
+		}
 		rateLimits, err := tx.Exec(ctx, `
 with expired_rate_limits as (
     select scope, subject_hash

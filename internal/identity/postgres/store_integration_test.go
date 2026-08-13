@@ -722,6 +722,13 @@ from generate_series(1, 101) as rows(n)`, now); err != nil {
 			)
 		}
 	}
+	var retentionFloor int64
+	if err := pool.QueryRow(ctx, `select event_retention_floor from workspaces where id = $1::uuid`, workspaceOne).Scan(&retentionFloor); err != nil {
+		t.Fatalf("inspect event retention floor: %v", err)
+	}
+	if retentionFloor != 101 {
+		t.Fatalf("event retention floor = %d, want 101", retentionFloor)
+	}
 }
 
 func TestClaimAndCleanupSerializeGrantValidity(t *testing.T) {

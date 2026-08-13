@@ -91,8 +91,17 @@ func (s *apiServer) events(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	result, err := s.identity.Sync(r.Context(), principal, cursor, maxSyncLimit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		writeError(w, identity.ErrInvalid)
+		return
+	}
+	if controller := http.NewResponseController(w); controller.SetWriteDeadline(time.Time{}) != nil {
 		writeError(w, identity.ErrInvalid)
 		return
 	}
@@ -107,10 +116,6 @@ func (s *apiServer) events(w http.ResponseWriter, r *http.Request) {
 	heartbeat := time.NewTicker(sseHeartbeatInterval)
 	defer heartbeat.Stop()
 	for {
-		result, err := s.identity.Sync(r.Context(), principal, cursor, maxSyncLimit)
-		if err != nil {
-			return
-		}
 		for _, event := range result.Events {
 			if err := writeInvalidation(w, flusher, event.Sequence); err != nil {
 				return
@@ -118,6 +123,10 @@ func (s *apiServer) events(w http.ResponseWriter, r *http.Request) {
 			cursor = event.Sequence
 		}
 		if result.HasMore {
+			result, err = s.identity.Sync(r.Context(), principal, cursor, maxSyncLimit)
+			if err != nil {
+				return
+			}
 			continue
 		}
 		select {
@@ -129,6 +138,10 @@ func (s *apiServer) events(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			flusher.Flush()
+		}
+		result, err = s.identity.Sync(r.Context(), principal, cursor, maxSyncLimit)
+		if err != nil {
+			return
 		}
 	}
 }

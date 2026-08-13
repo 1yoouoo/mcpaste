@@ -276,15 +276,38 @@ func scanTextRevision(row textRevisionRow) (identity.TextRevision, error) {
 func (s *Store) PurgeText(ctx context.Context, now time.Time) (int64, int64, error) {
 	var revisions, pastes int64
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, cleanupAdvisoryLockName); err != nil {
+			return err
+		}
 		command, err := tx.Exec(ctx, `
-delete from paste_revisions where expires_at <= $1 and revision_kind in ('content', 'tombstone')`, now)
+with expired_revisions as (
+    select id
+    from paste_revisions
+    where expires_at <= $1 and revision_kind in ('content', 'tombstone')
+    order by expires_at, id
+    for update skip locked
+    limit 100
+)
+delete from paste_revisions as revision
+using expired_revisions
+where revision.id = expired_revisions.id`, now)
 		if err != nil {
 			return err
 		}
 		revisions = command.RowsAffected()
 		command, err = tx.Exec(ctx, `
-delete from pastes p
-where not exists (select 1 from paste_revisions r where r.workspace_id = p.workspace_id and r.paste_id = p.id)`)
+with orphan_pastes as (
+    select p.workspace_id, p.id
+    from pastes p
+    where not exists (select 1 from paste_revisions r where r.workspace_id = p.workspace_id and r.paste_id = p.id)
+    order by p.workspace_id, p.id
+    for update skip locked
+    limit 100
+)
+delete from pastes as paste
+using orphan_pastes
+where paste.workspace_id = orphan_pastes.workspace_id
+  and paste.id = orphan_pastes.id`)
 		if err != nil {
 			return err
 		}
@@ -297,17 +320,56 @@ where not exists (select 1 from paste_revisions r where r.workspace_id = p.works
 func (s *Store) PurgeImages(ctx context.Context, now time.Time) (int64, int64, error) {
 	var revisions, assets int64
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		command, err := tx.Exec(ctx, `delete from paste_assets where expires_at <= $1`, now)
+		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, cleanupAdvisoryLockName); err != nil {
+			return err
+		}
+		command, err := tx.Exec(ctx, `
+with expired_assets as (
+    select workspace_id, revision_id, asset_index
+    from paste_assets
+    where expires_at <= $1
+    order by expires_at, workspace_id, revision_id, asset_index
+    for update skip locked
+    limit 100
+)
+delete from paste_assets as asset
+using expired_assets
+where asset.workspace_id = expired_assets.workspace_id
+  and asset.revision_id = expired_assets.revision_id
+  and asset.asset_index = expired_assets.asset_index`, now)
 		if err != nil {
 			return err
 		}
 		assets = command.RowsAffected()
-		command, err = tx.Exec(ctx, `delete from paste_revisions where expires_at <= $1 and revision_kind = 'image_bundle'`, now)
+		command, err = tx.Exec(ctx, `
+with expired_revisions as (
+    select id
+    from paste_revisions
+    where expires_at <= $1 and revision_kind = 'image_bundle'
+    order by expires_at, id
+    for update skip locked
+    limit 100
+)
+delete from paste_revisions as revision
+using expired_revisions
+where revision.id = expired_revisions.id`, now)
 		if err != nil {
 			return err
 		}
 		revisions = command.RowsAffected()
-		_, err = tx.Exec(ctx, `delete from pastes p where not exists (select 1 from paste_revisions r where r.workspace_id = p.workspace_id and r.paste_id = p.id)`)
+		_, err = tx.Exec(ctx, `
+with orphan_pastes as (
+    select p.workspace_id, p.id
+    from pastes p
+    where not exists (select 1 from paste_revisions r where r.workspace_id = p.workspace_id and r.paste_id = p.id)
+    order by p.workspace_id, p.id
+    for update skip locked
+    limit 100
+)
+delete from pastes as paste
+using orphan_pastes
+where paste.workspace_id = orphan_pastes.workspace_id
+  and paste.id = orphan_pastes.id`)
 		return err
 	})
 	return revisions, assets, err

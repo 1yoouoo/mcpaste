@@ -54,9 +54,19 @@ jobs:
           xcrun stapler staple "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/MCPaste-final.zip"
-          shasum -a 256 "$RUNNER_TEMP/MCPaste-final.zip" > "$RUNNER_TEMP/SHA256SUMS"
+          shasum -a 256 "$RUNNER_TEMP/MCPaste-final.zip" > "$RUNNER_TEMP/macOS-SHA256SUMS"
+          cp "$GITHUB_WORKSPACE/THIRD_PARTY_NOTICES.md" "$RUNNER_TEMP/THIRD_PARTY_NOTICES.md"
       - name: Publish macOS artifact
-        if: ${{ startsWith(github.ref, 'refs/tags/') }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/MCPaste-final.zip" "$RUNNER_TEMP/SHA256SUMS"
+        run: |
+          test -n "$GITHUB_REF_NAME"
+          for attempt in {1..30}; do
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/MCPaste-final.zip" "$RUNNER_TEMP/macOS-SHA256SUMS" "$RUNNER_TEMP/THIRD_PARTY_NOTICES.md"
+              exit 0
+            fi
+            sleep 10
+          done
+          printf '%s\n' 'Linux release was not created before the macOS upload timeout.' >&2
+          exit 1

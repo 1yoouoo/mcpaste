@@ -24,7 +24,7 @@ func TestStatusReportsPartialAndRequireCurrentRejectsIt(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if len(status.Applied) != 0 || status.Available != 3 {
+		if len(status.Applied) != 0 || status.Available != 4 {
 			t.Fatalf("partial status counts = %d/%d", len(status.Applied), status.Available)
 		}
 		if _, err := migrate.RequireCurrent(ctx, conn, available); !errors.Is(err, migrate.ErrMigrationsNotCurrent) {
@@ -37,7 +37,7 @@ func TestStatusReportsPartialAndRequireCurrentRejectsIt(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if len(current.Applied) != 3 || current.Available != 3 {
+		if len(current.Applied) != 4 || current.Available != 4 {
 			t.Fatalf("current status counts = %d/%d", len(current.Applied), current.Available)
 		}
 		return nil
@@ -62,18 +62,18 @@ func TestUpStatusDownAndReapply(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if len(status.Applied) != 3 || status.Available != 3 || status.Applied[0].Name != "identity" || status.Applied[1].Name != "text_pastes" || status.Applied[2].Name != "image_bundles" {
+		if len(status.Applied) != 4 || status.Available != 4 || status.Applied[0].Name != "identity" || status.Applied[1].Name != "text_pastes" || status.Applied[2].Name != "image_bundles" || status.Applied[3].Name != "event_cursor_floor" {
 			t.Fatalf("status counts/name = %d/%d/%q", len(status.Applied), status.Available, status.Applied[0].Name)
 		}
 		if err := migrate.DownOne(ctx, conn, available); err != nil {
 			return err
 		}
-		var tableName *string
-		if err := conn.QueryRow(ctx, "select to_regclass('paste_assets')::text").Scan(&tableName); err != nil {
+		var columnName *string
+		if err := conn.QueryRow(ctx, "select column_name from information_schema.columns where table_schema = current_schema() and table_name = 'workspaces' and column_name = 'event_retention_floor'").Scan(&columnName); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		if tableName != nil {
-			t.Fatalf("paste_assets still exists: %q", *tableName)
+		if columnName != nil {
+			t.Fatalf("event_retention_floor still exists: %q", *columnName)
 		}
 		return migrate.Up(ctx, conn, available)
 	})
@@ -118,7 +118,7 @@ func TestCheckCurrentSucceedsInsideReadOnlyTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckCurrent() error = %v", err)
 	}
-	if len(status.Applied) != status.Available || status.Available != 3 {
+	if len(status.Applied) != status.Available || status.Available != 4 {
 		t.Fatalf("read-only current counts = %d/%d", len(status.Applied), status.Available)
 	}
 }

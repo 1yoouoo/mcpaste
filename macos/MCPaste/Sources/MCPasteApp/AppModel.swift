@@ -142,16 +142,25 @@ public final class AppModel: ObservableObject {
         pollingTask?.cancel()
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
-                do { try await Task.sleep(nanoseconds: 15 * 1_000_000_000) } catch { return }
                 guard let self, !Task.isCancelled else { return }
-                try? await self.refreshSession()
+                if let api = self.api, let session = self.session {
+                    do {
+                        for try await _ in api.eventStream(after: session.currentCursor()) {
+                            try? await self.refreshSession()
+                        }
+                    } catch {
+                        try? await self.refreshSession()
+                    }
+                }
+                do { try await Task.sleep(nanoseconds: 15 * 1_000_000_000) } catch { return }
             }
         }
         _ = deviceID
     }
 
-    private func refreshSession() async throws {
-        try await session?.refresh()
+	private func refreshSession() async throws {
+		await session?.replayPending()
+		try await session?.refresh()
         try await session?.refreshDevices()
         history = session?.history ?? []
         pendingCount = session?.pendingCount ?? 0

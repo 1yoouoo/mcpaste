@@ -467,7 +467,7 @@ func TestPasteHTTPContractAndConnectorIsolation(t *testing.T) {
 	if err := json.Unmarshal(body, &firstSync); err != nil {
 		t.Fatalf("decode sync: %v", err)
 	}
-	if status != http.StatusOK || !firstSync.HasMore || len(firstSync.Events) != 1 || firstSync.Events[0].Text == nil || *firstSync.Events[0].Text != exact {
+	if status != http.StatusOK || !firstSync.HasMore || len(firstSync.Events) != 1 || firstSync.Cursor != firstSync.Events[0].Sequence || firstSync.Events[0].Text == nil || *firstSync.Events[0].Text != exact {
 		t.Fatalf("sync status/body = %d/%q", status, body)
 	}
 	status, _, body = h.request(http.MethodGet, "/v1/sync?after=not-a-sequence", fullToken, "", nil)

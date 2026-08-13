@@ -9,6 +9,7 @@ esac
 compose_file="${MCPASTE_COMPOSE_FILE:-/opt/mcpaste/deploy/compose.production.yaml}"
 deploy_env="${MCPASTE_DEPLOY_ENV:-/etc/mcpaste/deploy.env}"
 server_env="${MCPASTE_SERVER_ENV_FILE:-/etc/mcpaste/server.env}"
+postgres_env="${MCPASTE_POSTGRES_ENV_FILE:-/etc/mcpaste/postgres.env}"
 if [[ "${2:-}" == '--smoke-stdin' ]]; then
 	if ! IFS= read -r endpoint || [[ -z "$endpoint" ]]; then
 		printf '%s\n' 'MCPASTE_HEALTH_ENDPOINT is required on stdin.' >&2
@@ -25,6 +26,7 @@ fi
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 test -r "$compose_file"
 test -r "$server_env"
+test -r "$postgres_env"
 install -d -m 0700 "$(dirname "$deploy_env")"
 previous=''
 if [[ -f "$deploy_env" ]]; then

@@ -76,3 +76,14 @@ func TestConfigureClaudePreservesUnrelatedServersAndMode(t *testing.T) {
 		t.Fatal("Claude config contains credential")
 	}
 }
+
+func TestConfigureClientsRejectsMissingClientConfigurations(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_CONFIG_PATH", "")
+	t.Setenv("CLAUDE_CONFIG_PATH", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	err := ConfigureClients(ClientConfigOptions{CommandPath: "/opt/mcpaste/bin/mcpaste", Endpoint: "https://example.invalid/v1/mcp"})
+	if err == nil || !strings.Contains(err.Error(), "no Codex or Claude Code configuration") {
+		t.Fatalf("ConfigureClients() error = %v", err)
+	}
+}

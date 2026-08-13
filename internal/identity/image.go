@@ -2,6 +2,8 @@ package identity
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"time"
 
@@ -134,7 +136,14 @@ func (s *Service) ImageAsset(ctx context.Context, principal Principal, pasteID s
 func imageCanonicalInput(input CreateImagePasteInput) any {
 	items := make([]map[string]any, 0, len(input.Assets))
 	for _, asset := range input.Assets {
-		items = append(items, map[string]any{"mime_type": asset.MIMEType, "width": asset.Width, "height": asset.Height, "byte_size": len(asset.Bytes)})
+		digest := sha256.Sum256(asset.Bytes)
+		items = append(items, map[string]any{
+			"mime_type": asset.MIMEType,
+			"width":     asset.Width,
+			"height":    asset.Height,
+			"byte_size": len(asset.Bytes),
+			"sha256":    hex.EncodeToString(digest[:]),
+		})
 	}
 	return map[string]any{"assets": items}
 }

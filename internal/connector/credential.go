@@ -93,6 +93,18 @@ func SaveCredential(path string, credential Credential) error {
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return errors.New("replace connector credential")
 	}
+	if err := syncDirectory(directory); err != nil {
+		return errors.New("sync connector credential directory")
+	}
 	removeTemporary = false
 	return nil
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }

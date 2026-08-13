@@ -69,7 +69,7 @@ public final class SQLiteCache {
     }
 
     func enqueue(kind: MutationKind, pasteID: String, body: Data) throws -> PendingMutation {
-        let key = UUID().uuidString
+		let key = UUID().uuidString.lowercased()
         try withStatement("INSERT INTO offline_mutations(kind,paste_id,body,idempotency_key,created_at) VALUES(?,?,?,?,?);") { statement in
             bind(kind.rawValue, at: 1, in: statement); bind(pasteID, at: 2, in: statement); _ = body.withUnsafeBytes { sqlite3_bind_blob(statement, 3, $0.baseAddress, Int32(body.count), transient) }; bind(key, at: 4, in: statement); sqlite3_bind_double(statement, 5, Date().timeIntervalSince1970); try step(statement)
         }

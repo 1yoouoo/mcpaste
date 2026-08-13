@@ -43,6 +43,9 @@ func ConfigureClients(options ClientConfigOptions) error {
 			return err
 		}
 	}
+	if options.CodexPath == "" && options.ClaudePath == "" {
+		return errors.New("no Codex or Claude Code configuration detected")
+	}
 	return nil
 }
 
@@ -253,6 +256,9 @@ func atomicConfigWrite(path string, data []byte) error {
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return errors.New("replace client configuration")
+	}
+	if err := syncDirectory(directory); err != nil {
+		return errors.New("sync client configuration directory")
 	}
 	removeTemporary = false
 	return nil

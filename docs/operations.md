@@ -7,7 +7,8 @@ This runbook describes the approved single-host topology: Caddy is public on por
 - Ubuntu host with Docker Engine and Compose v2, a reserved public address, and a firewall allowing only TCP 80 and 443.
 - A DNS A/AAAA record for the production hostname, with the hostname used as `MCPASTE_DOMAIN`.
 - A protected GitHub `production` environment containing the deploy host, user, SSH key, known-hosts, health endpoint, and MCP connector smoke token (`MCPASTE_SMOKE_TOKEN`) values.
-- `/etc/mcpaste/server.env`, owned by `root:root`, mode `0600`, populated from `deploy/server.env.example` with a random database password and 32-byte raw URL-base64 AES key.
+- `/etc/mcpaste/server.env`, owned by `root:root`, mode `0600`, populated from `deploy/server.env.example` with the database URL and 32-byte raw URL-base64 AES key.
+- `/etc/mcpaste/postgres.env`, owned by `root:root`, mode `0600`, populated from `deploy/postgres.env.example` with only the PostgreSQL bootstrap variables. Never place application encryption keys in this file.
 - `/etc/mcpaste/deploy.env`, mode `0600`, containing only immutable `MCPASTE_IMAGE` and `MCPASTE_DOMAIN` values for Compose interpolation.
 
 ## First boot
@@ -15,7 +16,9 @@ This runbook describes the approved single-host topology: Caddy is public on por
 ```sh
 sudo install -d -o root -g root -m 0700 /etc/mcpaste
 sudo install -o root -g root -m 0600 deploy/server.env.example /etc/mcpaste/server.env
+sudo install -o root -g root -m 0600 deploy/postgres.env.example /etc/mcpaste/postgres.env
 sudoedit /etc/mcpaste/server.env
+sudoedit /etc/mcpaste/postgres.env
 sudo sh -c 'printf "%s\n" "MCPASTE_DOMAIN=YOUR_REAL_HOSTNAME" "MCPASTE_IMAGE=ghcr.io/YOUR_OWNER/mcpaste@sha256:REPLACE_WITH_DIGEST" > /etc/mcpaste/deploy.env'
 sudo chmod 0600 /etc/mcpaste/deploy.env
 sudo deploy/bootstrap-host.sh

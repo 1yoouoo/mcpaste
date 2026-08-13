@@ -4,11 +4,15 @@ public protocol SyncAPI: AnyObject {
     func sync(after: Int64) async throws -> SyncPage
 }
 
+public protocol EventsAPI: AnyObject {
+    func eventStream(after: Int64) -> AsyncThrowingStream<Int64, Error>
+}
+
 public protocol SnapshotAPI: AnyObject {
     func snapshot() async throws -> SnapshotPage
 }
 
-public final class MCPasteAPI: SyncAPI, SnapshotAPI {
+public final class MCPasteAPI: SyncAPI, SnapshotAPI, EventsAPI {
     public let baseURL: URL
     public let token: String
     private let session: URLSession
@@ -97,6 +101,44 @@ public final class MCPasteAPI: SyncAPI, SnapshotAPI {
 
     public func sync(after: Int64) async throws -> SyncPage { try await send(path: "/v1/sync?after=\(after)") }
 
+    public func eventStream(after: Int64) -> AsyncThrowingStream<Int64, Error> {
+        AsyncThrowingStream { continuation in
+            let cancellation = EventStreamCancellation()
+            cancellation.task = Task {
+                do {
+					var request = try makeRequest(path: "/v1/events?after=\(after)", body: Optional<String>.none)
+                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    request.setValue(String(after), forHTTPHeaderField: "Last-Event-ID")
+                    let (bytes, response) = try await session.bytes(for: request)
+                    guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+                    guard (200..<300).contains(http.statusCode) else {
+                        if http.statusCode == 401 { throw APIError.unauthorized }
+                        if http.statusCode == 403 { throw APIError.forbidden }
+                        if http.statusCode == 410 { throw APIError.cursorExpired }
+                        throw APIError.http(status: http.statusCode)
+                    }
+                    var eventID: Int64?
+                    for try await line in bytes.lines {
+                        if line.hasPrefix("id:") {
+                            eventID = Int64(line.dropFirst(3).trimmingCharacters(in: .whitespaces))
+						} else if line.isEmpty, let value = eventID {
+							continuation.yield(value)
+							eventID = nil
+                        }
+                    }
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch let error as APIError {
+                    continuation.finish(throwing: error)
+                } catch {
+                    continuation.finish(throwing: APIError.transport)
+                }
+            }
+            continuation.onTermination = { _ in cancellation.task?.cancel() }
+        }
+    }
+
     public func snapshot() async throws -> SnapshotPage { try await send(path: "/v1/snapshot") }
 
     public func listDevices() async throws -> [DeviceRecord] { let response: DeviceListResponse = try await send(path: "/v1/devices"); return response.devices }
@@ -140,6 +182,10 @@ public final class MCPasteAPI: SyncAPI, SnapshotAPI {
             }
         } catch let error as APIError { throw error } catch { throw APIError.transport }
     }
+}
+
+private final class EventStreamCancellation: @unchecked Sendable {
+    var task: Task<Void, Never>?
 }
 
 private struct PasteListResponse: Decodable { let pastes: [PasteRecord] }

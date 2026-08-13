@@ -10,6 +10,14 @@ import (
 	"github.com/1yoouoo/mcpaste/internal/secure"
 )
 
+func retentionExpiry(now time.Time) time.Time {
+	expiresAt := now.AddDate(1, 0, 0)
+	if now.Month() == time.February && now.Day() == 29 && expiresAt.Month() == time.March && expiresAt.Day() == 1 {
+		return expiresAt.AddDate(0, 0, -1)
+	}
+	return expiresAt
+}
+
 func (s *Service) CreatePaste(ctx context.Context, principal Principal, idempotencyKey string, input CreatePasteInput) (Result, error) {
 	if principal.Scope != "full" {
 		return Result{}, ErrForbidden
@@ -31,7 +39,7 @@ func (s *Service) CreatePaste(ctx context.Context, principal Principal, idempote
 			if err := tx.SetPasteKind(ctx, principal.WorkspaceID, pasteID, "text"); err != nil {
 				return nil, "", err
 			}
-			expiresAt := now.AddDate(1, 0, 0)
+			expiresAt := retentionExpiry(now)
 			envelope, err := s.keyring.Encrypt("paste-text", textObjectID(principal.WorkspaceID, pasteID, revisionID), []byte(input.Text))
 			if err != nil {
 				return nil, "", err
@@ -61,7 +69,7 @@ func (s *Service) UpdatePaste(ctx context.Context, principal Principal, pasteID,
 			if err := tx.SetPasteKind(ctx, principal.WorkspaceID, pasteID, "text"); err != nil {
 				return nil, "", err
 			}
-			expiresAt := now.AddDate(1, 0, 0)
+			expiresAt := retentionExpiry(now)
 			envelope, err := s.keyring.Encrypt("paste-text", textObjectID(principal.WorkspaceID, pasteID, revisionID), []byte(input.Text))
 			if err != nil {
 				return nil, "", err
@@ -87,7 +95,7 @@ func (s *Service) DeletePaste(ctx context.Context, principal Principal, pasteID,
 	}
 	result, err := s.mutate(ctx, principal.WorkspaceID, "paste.delete:"+pasteID, idempotencyKey, principal.WorkspaceID, []byte("{}"), 204,
 		func(tx TxStore, now time.Time) (any, string, error) {
-			expiresAt := now.AddDate(1, 0, 0)
+			expiresAt := retentionExpiry(now)
 			if _, err := tx.AppendTextRevision(ctx, principal.WorkspaceID, pasteID, revisionID, "tombstone", "paste.deleted", secure.Envelope{}, now, expiresAt); err != nil {
 				return nil, "", err
 			}

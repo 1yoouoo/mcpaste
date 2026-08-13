@@ -13,22 +13,14 @@ func (s *txStore) Sync(ctx context.Context, workspaceID string, after int64, lim
 	if after < 0 || limit < 1 {
 		return identity.SyncResult{}, identity.ErrInvalid
 	}
-	var cursor int64
+	var cursor, retentionFloor int64
 	if err := s.tx.QueryRow(ctx, `
-select next_event_sequence from workspaces where id = $1::uuid`, workspaceID).Scan(&cursor); errors.Is(err, pgx.ErrNoRows) {
+select next_event_sequence, event_retention_floor from workspaces where id = $1::uuid`, workspaceID).Scan(&cursor, &retentionFloor); errors.Is(err, pgx.ErrNoRows) {
 		return identity.SyncResult{}, identity.ErrNotFound
 	} else if err != nil {
 		return identity.SyncResult{}, err
 	}
-	var oldest *int64
-	if err := s.tx.QueryRow(ctx, `
-select min(sequence)
-from workspace_events
-where workspace_id = $1::uuid
-  and event_type in ('paste.created', 'paste.revised', 'paste.deleted')`, workspaceID).Scan(&oldest); err != nil {
-		return identity.SyncResult{}, err
-	}
-	if after > 0 && oldest != nil && after < *oldest-1 {
+	if after > 0 && after < retentionFloor {
 		return identity.SyncResult{}, identity.ErrCursorExpired
 	}
 	rows, err := s.tx.Query(ctx, `
@@ -70,8 +62,10 @@ limit $3`, workspaceID, after, limit+1, now)
 		return identity.SyncResult{}, err
 	}
 	hasMore := len(events) > limit
+	resultCursor := cursor
 	if hasMore {
 		events = events[:limit]
+		resultCursor = events[len(events)-1].Sequence
 	}
-	return identity.SyncResult{Cursor: cursor, HasMore: hasMore, Events: events}, nil
+	return identity.SyncResult{Cursor: resultCursor, HasMore: hasMore, Events: events}, nil
 }

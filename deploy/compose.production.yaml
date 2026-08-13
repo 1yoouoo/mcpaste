@@ -62,10 +62,7 @@ services:
     image: postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
     restart: unless-stopped
     env_file:
-      - ${MCPASTE_SERVER_ENV_FILE:-/etc/mcpaste/server.env}
-    environment:
-      POSTGRES_DB: mcpaste
-      POSTGRES_USER: mcpaste
+      - ${MCPASTE_POSTGRES_ENV_FILE:-/etc/mcpaste/postgres.env}
     volumes:
       - mcpaste-postgres:/var/lib/postgresql
     networks:
