@@ -84,10 +84,15 @@ func logRecoveredPanic(logger *slog.Logger, r *http.Request) {
 	)
 }
 
+type informationalResponse struct {
+	status int
+	header http.Header
+}
+
 type bufferedResponse struct {
 	header        http.Header
 	body          bytes.Buffer
-	informational []int
+	informational []informationalResponse
 	status        int
 	wroteHeader   bool
 }
@@ -103,8 +108,11 @@ func (w *bufferedResponse) WriteHeader(status int) {
 	if status < 100 || status > 999 {
 		panic(fmt.Sprintf("invalid WriteHeader code %v", status))
 	}
-	if status >= 100 && status <= 199 {
-		w.informational = append(w.informational, status)
+	if status >= 100 && status <= 199 && status != http.StatusSwitchingProtocols {
+		w.informational = append(w.informational, informationalResponse{
+			status: status,
+			header: w.header.Clone(),
+		})
 		return
 	}
 	w.status = status
@@ -119,16 +127,20 @@ func (w *bufferedResponse) Write(data []byte) (int, error) {
 }
 
 func (w *bufferedResponse) flush(target http.ResponseWriter) {
-	for name, values := range w.header {
-		for _, value := range values {
-			target.Header().Add(name, value)
-		}
+	for _, response := range w.informational {
+		replaceHeader(target.Header(), response.header)
+		target.WriteHeader(response.status)
 	}
-	for _, status := range w.informational {
-		target.WriteHeader(status)
-	}
+	replaceHeader(target.Header(), w.header)
 	target.WriteHeader(w.status)
 	_, _ = target.Write(w.body.Bytes())
+}
+
+func replaceHeader(target, source http.Header) {
+	clear(target)
+	for name, values := range source {
+		target[name] = append([]string(nil), values...)
+	}
 }
 
 func safeRoute(pattern string) string {
@@ -155,7 +167,7 @@ func (w *statusWriter) WriteHeader(status int) {
 	if w.wroteHeader {
 		return
 	}
-	if status >= 100 && status <= 199 {
+	if status >= 100 && status <= 199 && status != http.StatusSwitchingProtocols {
 		w.ResponseWriter.WriteHeader(status)
 		return
 	}

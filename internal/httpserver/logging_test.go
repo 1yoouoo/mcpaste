@@ -207,8 +207,10 @@ func TestProductionMiddlewarePreservesEarlyHintsBeforeFinalResponse(t *testing.T
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 	next := http.NewServeMux()
 	next.HandleFunc("GET /v1/early-hints", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Link", "</style.css>; rel=preload; as=style")
+		w.Header().Set("Link", "first")
 		w.WriteHeader(http.StatusEarlyHints)
+		w.Header().Del("Link")
+		w.Header().Set("X-Final-Only", "final")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte("created"))
 	})
@@ -221,9 +223,11 @@ func TestProductionMiddlewarePreservesEarlyHintsBeforeFinalResponse(t *testing.T
 		t.Fatalf("NewRequest() error = %v", err)
 	}
 	var informational []int
+	var informationalHeaders []http.Header
 	trace := &httptrace.ClientTrace{
-		Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
+		Got1xxResponse: func(code int, header textproto.MIMEHeader) error {
 			informational = append(informational, code)
+			informationalHeaders = append(informationalHeaders, http.Header(header).Clone())
 			return nil
 		},
 	}
@@ -241,8 +245,14 @@ func TestProductionMiddlewarePreservesEarlyHintsBeforeFinalResponse(t *testing.T
 	if len(informational) != 1 || informational[0] != http.StatusEarlyHints {
 		t.Fatalf("informational statuses = %v, want [%d]", informational, http.StatusEarlyHints)
 	}
+	if len(informationalHeaders) != 1 || informationalHeaders[0].Get("Link") != "first" || informationalHeaders[0].Get("X-Final-Only") != "" {
+		t.Fatal("informational response did not retain its isolated header snapshot")
+	}
 	if response.StatusCode != http.StatusCreated || string(body) != "created" {
 		t.Fatalf("final status/body bytes = %d/%d", response.StatusCode, len(body))
+	}
+	if response.Header.Get("X-Final-Only") != "final" || response.Header.Get("Link") != "" {
+		t.Fatal("final response retained stale informational headers")
 	}
 	entries := decodeLogEntries(t, logs.Bytes())
 	if len(entries) != 1 || entries[0]["msg"] != "http request" {
@@ -250,6 +260,32 @@ func TestProductionMiddlewarePreservesEarlyHintsBeforeFinalResponse(t *testing.T
 	}
 	if entries[0]["status"] != float64(http.StatusCreated) {
 		t.Fatalf("access status = %v, want %d", entries[0]["status"], http.StatusCreated)
+	}
+}
+
+func TestProductionMiddlewareTreatsSwitchingProtocolsAsFinal(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	next := http.NewServeMux()
+	next.HandleFunc("GET /v1/switching-protocols", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusSwitchingProtocols)
+		w.WriteHeader(http.StatusCreated)
+	})
+	response := &statusSequenceWriter{header: make(http.Header)}
+	request := httptest.NewRequest(http.MethodGet, "/v1/switching-protocols", nil)
+	handler := NewRecoveryMiddleware(logger)(NewAccessLogMiddleware(logger)(next))
+
+	handler.ServeHTTP(response, request)
+
+	if len(response.statuses) != 1 || response.statuses[0] != http.StatusSwitchingProtocols {
+		t.Fatalf("forwarded statuses = %v, want [%d]", response.statuses, http.StatusSwitchingProtocols)
+	}
+	entries := decodeLogEntries(t, logs.Bytes())
+	if len(entries) != 1 || entries[0]["msg"] != "http request" {
+		t.Fatalf("access log entries = %d", len(entries))
+	}
+	if entries[0]["status"] != float64(http.StatusSwitchingProtocols) {
+		t.Fatalf("access status = %v, want %d", entries[0]["status"], http.StatusSwitchingProtocols)
 	}
 }
 
@@ -350,4 +386,21 @@ func decodeLogEntries(t *testing.T, data []byte) []map[string]any {
 		}
 		entries = append(entries, entry)
 	}
+}
+
+type statusSequenceWriter struct {
+	header   http.Header
+	statuses []int
+}
+
+func (w *statusSequenceWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *statusSequenceWriter) WriteHeader(status int) {
+	w.statuses = append(w.statuses, status)
+}
+
+func (w *statusSequenceWriter) Write(data []byte) (int, error) {
+	return len(data), nil
 }
