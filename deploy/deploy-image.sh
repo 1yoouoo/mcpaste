@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-image="${1:?usage: deploy-image.sh ghcr.io/owner/mcpaste@sha256:...}"
+image="${1:?usage: deploy-image.sh ghcr.io/owner/mcpaste@sha256:... [--smoke-stdin]}"
 case "$image" in
     *@sha256:*) ;;
     *) printf '%s\n' 'Deployment requires an immutable image digest.' >&2; exit 1 ;;
 esac
 compose_file="${MCPASTE_COMPOSE_FILE:-/opt/mcpaste/deploy/compose.production.yaml}"
 deploy_env="${MCPASTE_DEPLOY_ENV:-/etc/mcpaste/deploy.env}"
-endpoint="${MCPASTE_HEALTH_ENDPOINT:?MCPASTE_HEALTH_ENDPOINT is required}"
 server_env="${MCPASTE_SERVER_ENV_FILE:-/etc/mcpaste/server.env}"
-smoke_token="${MCPASTE_SMOKE_TOKEN:?MCPASTE_SMOKE_TOKEN is required}"
+if [[ "${2:-}" == '--smoke-stdin' ]]; then
+	if ! IFS= read -r endpoint || [[ -z "$endpoint" ]]; then
+		printf '%s\n' 'MCPASTE_HEALTH_ENDPOINT is required on stdin.' >&2
+		exit 1
+	fi
+	if ! IFS= read -r smoke_token || [[ -z "$smoke_token" ]]; then
+		printf '%s\n' 'MCPASTE_SMOKE_TOKEN is required on stdin.' >&2
+		exit 1
+	fi
+else
+	endpoint="${MCPASTE_HEALTH_ENDPOINT:?MCPASTE_HEALTH_ENDPOINT is required}"
+	smoke_token="${MCPASTE_SMOKE_TOKEN:?MCPASTE_SMOKE_TOKEN is required}"
+fi
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 test -r "$compose_file"
 test -r "$server_env"
