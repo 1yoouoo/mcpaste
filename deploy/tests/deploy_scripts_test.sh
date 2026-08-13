@@ -13,7 +13,9 @@ grep -Eq 'MCPASTE_SMOKE_TOKEN' "$root/deploy/health-smoke.sh"
 grep -Eq -- '--smoke-stdin' "$root/deploy/deploy-image.sh" "$root/.github/workflows/deploy.yml"
 grep -Eq 'read -r endpoint' "$root/deploy/deploy-image.sh"
 postgres_line="$(grep -n 'docker compose.*up -d --wait --wait-timeout 60 postgres' "$root/deploy/deploy-image.sh" | cut -d: -f1 | head -n1 || true)"
-migrate_line="$(grep -n 'docker compose.*run --rm --no-deps server /mcpaste-migrate up' "$root/deploy/deploy-image.sh" | cut -d: -f1 | head -n1 || true)"
-test -n "$postgres_line" && test -n "$migrate_line" && test "$postgres_line" -lt "$migrate_line"
+migrate_line="$(grep -n 'docker compose.*run --rm --no-deps --entrypoint /mcpaste-migrate server up' "$root/deploy/deploy-image.sh" | cut -d: -f1 | head -n1 || true)"
+if [[ -z "$postgres_line" || -z "$migrate_line" || "$postgres_line" -ge "$migrate_line" ]]; then
+    exit 1
+fi
 grep -Eq 'mcpaste-postgres:/var/lib/postgresql$' "$root/deploy/compose.production.yaml"
 ! grep -Eq 'mcpaste-postgres:/var/lib/postgresql/data$' "$root/deploy/compose.production.yaml"

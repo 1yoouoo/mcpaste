@@ -50,7 +50,7 @@ fi
 chmod 0600 "${deploy_env}.next"
 docker compose --env-file "${deploy_env}.next" -f "$compose_file" pull server
 docker compose --env-file "${deploy_env}.next" -f "$compose_file" up -d --wait --wait-timeout 60 postgres
-docker compose --env-file "${deploy_env}.next" -f "$compose_file" run --rm --no-deps server /mcpaste-migrate up
+docker compose --env-file "${deploy_env}.next" -f "$compose_file" run --rm --no-deps --entrypoint /mcpaste-migrate server up
 mv -f "${deploy_env}.next" "$deploy_env"
 if ! docker compose --env-file "$deploy_env" -f "$compose_file" up -d server; then
 	restore_previous
