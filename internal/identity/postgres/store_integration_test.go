@@ -420,3 +420,430 @@ func TestIdempotencyScopeIsolation(t *testing.T) {
 		t.Fatalf("read scoped idempotency: %v", err)
 	}
 }
+
+func TestPairingClaimReplayReturnsSameEncryptedGrant(t *testing.T) {
+	ctx := context.Background()
+	store := New(testdb.New(t))
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	claimHash := bytes.Repeat([]byte{0x71}, 32)
+	grant := secure.Envelope{KeyID: "test-key", Nonce: bytes.Repeat([]byte{0x72}, 12), Ciphertext: []byte{0x73, 0x74}}
+	pairingID := "00000000-0000-4000-8000-000000000301"
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceOne, now); err != nil {
+			return err
+		}
+		approver, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{ID: deviceOne, DisplayName: "Approver", Platform: "macos", Role: "full", CreatedAt: now})
+		if err != nil {
+			return err
+		}
+		if err := tx.InsertPairing(ctx, identity.Pairing{
+			ID: pairingID, ShortCode: "23456789", ClaimHash: claimHash,
+			ProposedName: "Joiner", Platform: "linux", RequestedScope: "connector",
+			CreatedAt: now, ExpiresAt: now.Add(identity.PairingLifetime),
+			MetadataPurgeAt: now.Add(identity.PairingLifetime + identity.PairingMetadataLifetime),
+		}); err != nil {
+			return err
+		}
+		joining, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{ID: "00000000-0000-4000-8000-000000000302", DisplayName: "Joiner", Platform: "linux", Role: "connector", CreatedAt: now})
+		if err != nil {
+			return err
+		}
+		return tx.ApprovePairing(ctx, workspaceOne, pairingID, approver.ID, joining.ID, now, now.Add(identity.ClaimLifetime), grant, now.Add(identity.ClaimLifetime+identity.PairingMetadataLifetime))
+	})
+	if err != nil {
+		t.Fatalf("seed approved pairing: %v", err)
+	}
+	claim := func(claimHash []byte, claimAt time.Time) (identity.Pairing, error) {
+		var pairing identity.Pairing
+		err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+			var err error
+			pairing, err = tx.LockPairingForClaim(ctx, pairingID, claimHash, claimAt)
+			if err != nil {
+				return err
+			}
+			return tx.MarkPairingClaimed(ctx, pairingID, claimAt)
+		})
+		return pairing, err
+	}
+	first, err := claim(claimHash, now)
+	if err != nil {
+		t.Fatalf("first claim = %v", err)
+	}
+	second, err := claim(claimHash, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("second claim = %v", err)
+	}
+	if !bytes.Equal(first.Grant.Ciphertext, second.Grant.Ciphertext) || !bytes.Equal(first.Grant.Nonce, second.Grant.Nonce) {
+		t.Fatal("claim replay changed encrypted grant")
+	}
+	if _, err := claim(bytes.Repeat([]byte{0x75}, 32), now); !errors.Is(err, identity.ErrInvalidClaim) {
+		t.Fatalf("wrong claim error = %v", err)
+	}
+}
+
+func TestApprovedPairingDetailsExpireWhileClaimRemainsValid(t *testing.T) {
+	ctx := context.Background()
+	store := New(testdb.New(t))
+	createdAt := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	approvedAt := createdAt.Add(4 * time.Minute)
+	detailsAt := createdAt.Add(identity.PairingLifetime + time.Second)
+	pairingID := "00000000-0000-4000-8000-000000000331"
+	joiningID := "00000000-0000-4000-8000-000000000332"
+	claimHash := bytes.Repeat([]byte{0x76}, 32)
+	grant := secure.Envelope{KeyID: "test-key", Nonce: bytes.Repeat([]byte{0x77}, 12), Ciphertext: []byte{0x78}}
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceOne, createdAt); err != nil {
+			return err
+		}
+		approver, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: deviceOne, DisplayName: "Approver", Platform: "macos", Role: "full", CreatedAt: createdAt,
+		})
+		if err != nil {
+			return err
+		}
+		if err := tx.InsertPairing(ctx, identity.Pairing{
+			ID: pairingID, ShortCode: "2345678D", ClaimHash: claimHash,
+			ProposedName: "Joiner", Platform: "linux", RequestedScope: "connector",
+			CreatedAt: createdAt, ExpiresAt: createdAt.Add(identity.PairingLifetime),
+			MetadataPurgeAt: createdAt.Add(identity.PairingLifetime + identity.PairingMetadataLifetime),
+		}); err != nil {
+			return err
+		}
+		joining, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: joiningID, DisplayName: "Joiner", Platform: "linux", Role: "connector", CreatedAt: approvedAt,
+		})
+		if err != nil {
+			return err
+		}
+		return tx.ApprovePairing(
+			ctx, workspaceOne, pairingID, approver.ID, joining.ID,
+			approvedAt, approvedAt.Add(identity.ClaimLifetime), grant,
+			approvedAt.Add(identity.ClaimLifetime+identity.PairingMetadataLifetime),
+		)
+	})
+	if err != nil {
+		t.Fatalf("seed approved pairing: %v", err)
+	}
+	err = store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if _, err := tx.GetPairingByID(ctx, workspaceOne, pairingID, detailsAt); !errors.Is(err, identity.ErrPairingExpired) {
+			t.Fatalf("expired ID details error = %v", err)
+		}
+		if _, err := tx.GetPairingByShortCode(ctx, workspaceOne, "2345678D", detailsAt); !errors.Is(err, identity.ErrPairingExpired) {
+			t.Fatalf("expired short-code details error = %v", err)
+		}
+		pairing, err := tx.LockPairingForClaim(ctx, pairingID, claimHash, detailsAt)
+		if err != nil {
+			return err
+		}
+		if !pairing.ClaimExpiresAt.Equal(approvedAt.Add(identity.ClaimLifetime)) {
+			t.Fatal("private claim expiry differs from approval-relative window")
+		}
+		return tx.MarkPairingClaimed(ctx, pairingID, detailsAt)
+	})
+	if err != nil {
+		t.Fatalf("expired-details/private-claim transaction: %v", err)
+	}
+}
+
+func TestRenameListRevokeAndCrossWorkspaceRejection(t *testing.T) {
+	ctx := context.Background()
+	store := New(testdb.New(t))
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	hash := bytes.Repeat([]byte{0x81}, 32)
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceOne, now); err != nil {
+			return err
+		}
+		if err := tx.InsertWorkspace(ctx, workspaceTwo, now); err != nil {
+			return err
+		}
+		if _, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{ID: deviceOne, DisplayName: "MacBook Pro (3)", Platform: "macos", Role: "full", CreatedAt: now}); err != nil {
+			return err
+		}
+		if _, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{ID: "00000000-0000-4000-8000-000000000204", DisplayName: "MacBook Pro", Platform: "macos", Role: "full", CreatedAt: now}); err != nil {
+			return err
+		}
+		return tx.InsertCredential(ctx, workspaceOne, identity.CredentialRecord{DeviceID: deviceOne, Locator: "BBBBBBBBBBBBBBBBBBBBBB", Scope: "full", Hash: hash, CreatedAt: now})
+	})
+	if err != nil {
+		t.Fatalf("seed devices: %v", err)
+	}
+	err = store.WithinTx(ctx, func(tx identity.TxStore) error {
+		renamed, err := tx.RenameDevice(ctx, workspaceOne, deviceOne, "MACBOOK PRO", now)
+		if err != nil || renamed.DisplayName != "MACBOOK PRO (2)" {
+			t.Fatalf("RenameDevice() = %#v, %v", renamed, err)
+		}
+		devices, err := tx.ListDevices(ctx, workspaceOne, deviceOne)
+		if err != nil || len(devices) != 2 || !devices[0].IsCurrent {
+			t.Fatalf("ListDevices() = %#v, %v", devices, err)
+		}
+		if _, err := tx.RenameDevice(ctx, workspaceTwo, deviceOne, "stolen", now); !errors.Is(err, identity.ErrNotFound) {
+			t.Fatalf("cross-workspace rename error = %v", err)
+		}
+		if err := tx.RevokeDevice(ctx, workspaceOne, deviceOne, now); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("device administration transaction: %v", err)
+	}
+	if _, err := store.Authenticate(ctx, workspaceOne, "BBBBBBBBBBBBBBBBBBBBBB", hash, now); !errors.Is(err, identity.ErrUnauthorized) {
+		t.Fatalf("revoked auth error = %v", err)
+	}
+}
+
+func TestRenameUsesFourthSuffixWhenSecondAndThirdBelongToOtherDevices(t *testing.T) {
+	ctx := context.Background()
+	store := New(testdb.New(t))
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	targetID := "00000000-0000-4000-8000-000000000205"
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceOne, now); err != nil {
+			return err
+		}
+		for _, device := range []identity.Device{
+			{ID: deviceOne, DisplayName: "MacBook Pro", Platform: "macos", Role: "full", CreatedAt: now},
+			{ID: "00000000-0000-4000-8000-000000000202", DisplayName: "MacBook Pro", Platform: "macos", Role: "full", CreatedAt: now},
+			{ID: "00000000-0000-4000-8000-000000000203", DisplayName: "MacBook Pro", Platform: "macos", Role: "full", CreatedAt: now},
+			{ID: targetID, DisplayName: "Target", Platform: "macos", Role: "full", CreatedAt: now},
+		} {
+			if _, err := tx.InsertDevice(ctx, workspaceOne, device); err != nil {
+				return err
+			}
+		}
+		renamed, err := tx.RenameDevice(ctx, workspaceOne, targetID, "MACBOOK PRO", now)
+		if err != nil {
+			return err
+		}
+		if renamed.DisplayName != "MACBOOK PRO (4)" {
+			t.Fatalf("RenameDevice() display name = %q", renamed.DisplayName)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("fourth suffix transaction: %v", err)
+	}
+}
+
+func TestCleanupPurgesExpiredMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := New(testdb.New(t))
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	_, err := store.ConsumeRateLimit(ctx, identity.RateRule{Scope: "cleanup", Limit: 1, Window: time.Minute}, bytes.Repeat([]byte{0x91}, 32), now.Add(-48*time.Hour))
+	if err != nil {
+		t.Fatalf("seed rate limit: %v", err)
+	}
+	result, err := store.Cleanup(ctx, now)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if result.RateLimitRows != 1 {
+		t.Fatalf("RateLimitRows = %d", result.RateLimitRows)
+	}
+}
+
+func TestClaimAndCleanupSerializeGrantValidity(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	createdAt := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	claimAt := createdAt.Add(4*time.Minute + 59*time.Second)
+	cleanupAt := createdAt.Add(6 * time.Minute)
+	pairingID := "00000000-0000-4000-8000-000000000311"
+	joiningDeviceID := "00000000-0000-4000-8000-000000000312"
+	claimHash := bytes.Repeat([]byte{0xa1}, 32)
+	credentialHash := bytes.Repeat([]byte{0xa2}, 32)
+	credentialLocator := "CCCCCCCCCCCCCCCCCCCCCC"
+	grant := secure.Envelope{KeyID: "test-key", Nonce: bytes.Repeat([]byte{0xa3}, 12), Ciphertext: []byte{0xa4}}
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceOne, createdAt); err != nil {
+			return err
+		}
+		approver, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: deviceOne, DisplayName: "Approver", Platform: "macos", Role: "full", CreatedAt: createdAt,
+		})
+		if err != nil {
+			return err
+		}
+		if err := tx.InsertPairing(ctx, identity.Pairing{
+			ID: pairingID, ShortCode: "2345678A", ClaimHash: claimHash,
+			ProposedName: "Joiner", Platform: "linux", RequestedScope: "connector",
+			CreatedAt: createdAt, ExpiresAt: createdAt.Add(identity.PairingLifetime),
+			MetadataPurgeAt: createdAt.Add(identity.PairingLifetime + identity.PairingMetadataLifetime),
+		}); err != nil {
+			return err
+		}
+		joining, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: joiningDeviceID, DisplayName: "Joiner", Platform: "linux", Role: "connector", CreatedAt: createdAt,
+		})
+		if err != nil {
+			return err
+		}
+		if err := tx.InsertCredential(ctx, workspaceOne, identity.CredentialRecord{
+			DeviceID: joining.ID, Locator: credentialLocator, Scope: "connector", Hash: credentialHash, CreatedAt: createdAt,
+		}); err != nil {
+			return err
+		}
+		return tx.ApprovePairing(
+			ctx, workspaceOne, pairingID, approver.ID, joining.ID,
+			createdAt, createdAt.Add(identity.ClaimLifetime), grant,
+			createdAt.Add(identity.ClaimLifetime+identity.PairingMetadataLifetime),
+		)
+	})
+	if err != nil {
+		t.Fatalf("seed claim/cleanup race: %v", err)
+	}
+
+	type cleanupOutcome struct {
+		result identity.CleanupResult
+		err    error
+	}
+	start := make(chan struct{})
+	claimDone := make(chan error, 1)
+	cleanupDone := make(chan cleanupOutcome, 1)
+	go func() {
+		<-start
+		err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+			if _, err := tx.LockPairingForClaim(ctx, pairingID, claimHash, claimAt); err != nil {
+				return err
+			}
+			return tx.MarkPairingClaimed(ctx, pairingID, claimAt)
+		})
+		claimDone <- err
+	}()
+	go func() {
+		<-start
+		result, err := store.Cleanup(ctx, cleanupAt)
+		cleanupDone <- cleanupOutcome{result: result, err: err}
+	}()
+	close(start)
+	claimErr := <-claimDone
+	cleanup := <-cleanupDone
+	if cleanup.err != nil {
+		t.Fatalf("Cleanup() error = %v", cleanup.err)
+	}
+
+	var claimedAt, invalidatedAt *time.Time
+	if err := pool.QueryRow(ctx, `
+select claimed_at, claim_invalidated_at
+from pairing_requests
+where workspace_id = $1::uuid and id = $2::uuid`, workspaceOne, pairingID).Scan(&claimedAt, &invalidatedAt); err != nil {
+		t.Fatalf("inspect pairing terminal state: %v", err)
+	}
+	switch {
+	case claimErr == nil:
+		if cleanup.result.RevokedDevices != 0 || claimedAt == nil || invalidatedAt != nil {
+			t.Fatalf("claim-won state: revoked=%d claimed=%v invalidated=%v", cleanup.result.RevokedDevices, claimedAt != nil, invalidatedAt != nil)
+		}
+		if _, err := store.Authenticate(ctx, workspaceOne, credentialLocator, credentialHash, cleanupAt); err != nil {
+			t.Fatalf("claim-won credential authentication: %v", err)
+		}
+	case errors.Is(claimErr, identity.ErrPairingExpired):
+		if cleanup.result.RevokedDevices != 1 || claimedAt != nil || invalidatedAt == nil {
+			t.Fatalf("cleanup-won state: revoked=%d claimed=%v invalidated=%v", cleanup.result.RevokedDevices, claimedAt != nil, invalidatedAt != nil)
+		}
+		if _, err := store.Authenticate(ctx, workspaceOne, credentialLocator, credentialHash, cleanupAt); !errors.Is(err, identity.ErrUnauthorized) {
+			t.Fatalf("cleanup-won authentication error = %v", err)
+		}
+		var eventCount int
+		if err := pool.QueryRow(ctx, `
+select count(*)
+from workspace_events
+where workspace_id = $1::uuid and event_type = 'device.revoked' and object_id = $2::uuid`,
+			workspaceOne, joiningDeviceID).Scan(&eventCount); err != nil {
+			t.Fatalf("count cleanup event: %v", err)
+		}
+		if eventCount != 1 {
+			t.Fatalf("cleanup device.revoked events = %d", eventCount)
+		}
+	default:
+		t.Fatalf("claim error = %v", claimErr)
+	}
+}
+
+func TestCleanupWinsDeterministicallyAndRevokesGrant(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	createdAt := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	cleanupAt := createdAt.Add(6 * time.Minute)
+	pairingID := "00000000-0000-4000-8000-000000000321"
+	joiningDeviceID := "00000000-0000-4000-8000-000000000322"
+	claimHash := bytes.Repeat([]byte{0xb1}, 32)
+	credentialHash := bytes.Repeat([]byte{0xb2}, 32)
+	credentialLocator := "DDDDDDDDDDDDDDDDDDDDDD"
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceOne, createdAt); err != nil {
+			return err
+		}
+		approver, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: deviceOne, DisplayName: "Approver", Platform: "macos", Role: "full", CreatedAt: createdAt,
+		})
+		if err != nil {
+			return err
+		}
+		if err := tx.InsertPairing(ctx, identity.Pairing{
+			ID: pairingID, ShortCode: "2345678B", ClaimHash: claimHash,
+			ProposedName: "Joiner", Platform: "linux", RequestedScope: "connector",
+			CreatedAt: createdAt, ExpiresAt: createdAt.Add(identity.PairingLifetime),
+			MetadataPurgeAt: createdAt.Add(identity.PairingLifetime + identity.PairingMetadataLifetime),
+		}); err != nil {
+			return err
+		}
+		joining, err := tx.InsertDevice(ctx, workspaceOne, identity.Device{
+			ID: joiningDeviceID, DisplayName: "Joiner", Platform: "linux", Role: "connector", CreatedAt: createdAt,
+		})
+		if err != nil {
+			return err
+		}
+		if err := tx.InsertCredential(ctx, workspaceOne, identity.CredentialRecord{
+			DeviceID: joining.ID, Locator: credentialLocator, Scope: "connector", Hash: credentialHash, CreatedAt: createdAt,
+		}); err != nil {
+			return err
+		}
+		grant := secure.Envelope{KeyID: "test-key", Nonce: bytes.Repeat([]byte{0xb3}, 12), Ciphertext: []byte{0xb4}}
+		return tx.ApprovePairing(
+			ctx, workspaceOne, pairingID, approver.ID, joining.ID,
+			createdAt, createdAt.Add(identity.ClaimLifetime), grant,
+			createdAt.Add(identity.ClaimLifetime+identity.PairingMetadataLifetime),
+		)
+	})
+	if err != nil {
+		t.Fatalf("seed deterministic cleanup: %v", err)
+	}
+	result, err := store.Cleanup(ctx, cleanupAt)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if result.RevokedDevices != 1 {
+		t.Fatalf("RevokedDevices = %d", result.RevokedDevices)
+	}
+	if _, err := store.Authenticate(ctx, workspaceOne, credentialLocator, credentialHash, cleanupAt); !errors.Is(err, identity.ErrUnauthorized) {
+		t.Fatalf("revoked credential authentication error = %v", err)
+	}
+	var deviceRevoked, credentialRevoked, invalidatedAt *time.Time
+	var eventCount int
+	if err := pool.QueryRow(ctx, `
+select d.revoked_at, c.revoked_at, p.claim_invalidated_at,
+       (select count(*) from workspace_events e
+        where e.workspace_id = p.workspace_id and e.event_type = 'device.revoked' and e.object_id = p.device_id)
+from pairing_requests p
+join devices d on d.workspace_id = p.workspace_id and d.id = p.device_id
+join credentials c on c.workspace_id = d.workspace_id and c.device_id = d.id
+where p.workspace_id = $1::uuid and p.id = $2::uuid`, workspaceOne, pairingID).Scan(
+		&deviceRevoked, &credentialRevoked, &invalidatedAt, &eventCount,
+	); err != nil {
+		t.Fatalf("inspect cleanup state: %v", err)
+	}
+	if deviceRevoked == nil || credentialRevoked == nil || invalidatedAt == nil || eventCount != 1 {
+		t.Fatalf("cleanup state metadata: device=%v credential=%v invalidated=%v events=%d", deviceRevoked != nil, credentialRevoked != nil, invalidatedAt != nil, eventCount)
+	}
+	err = store.WithinTx(ctx, func(tx identity.TxStore) error {
+		_, err := tx.LockPairingForClaim(ctx, pairingID, claimHash, cleanupAt)
+		return err
+	})
+	if !errors.Is(err, identity.ErrPairingExpired) {
+		t.Fatalf("claim after cleanup error = %v", err)
+	}
+}
