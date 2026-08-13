@@ -67,4 +67,4 @@ jobs:
           digest="$(awk -F= '$1 == "MCPASTE_IMAGE" {print $2}' /tmp/mcpaste-deploy.env)"
           smoke_token_q="$(printf '%q' "$SMOKE_TOKEN")"
           health_endpoint_q="$(printf '%q' "$HEALTH_ENDPOINT")"
-          ssh "${ssh_options[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "MCPASTE_SMOKE_TOKEN=$smoke_token_q MCPASTE_HEALTH_ENDPOINT=$health_endpoint_q /opt/mcpaste/deploy/deploy-image.sh '$digest'"
+          ssh "${ssh_options[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "MCPASTE_SMOKE_TOKEN=$smoke_token_q MCPASTE_HEALTH_ENDPOINT=$health_endpoint_q sudo -n /opt/mcpaste/deploy/deploy-image.sh '$digest'"
