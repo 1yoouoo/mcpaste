@@ -10,9 +10,14 @@ type ReadinessFunc func(context.Context) error
 
 func NewHandler(readiness ReadinessFunc) http.Handler {
 	mux := http.NewServeMux()
+	registerHealth(mux, readiness)
+
+	return mux
+}
+
+func registerHealth(mux *http.ServeMux, readiness ReadinessFunc) {
 	mux.HandleFunc("/livez", healthHandler(nil))
 	mux.HandleFunc("/readyz", healthHandler(readiness))
-	return mux
 }
 
 func healthHandler(readiness ReadinessFunc) http.HandlerFunc {
