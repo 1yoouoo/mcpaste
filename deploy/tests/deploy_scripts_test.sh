@@ -10,6 +10,8 @@ grep -Eq 'sha256' "$root/deploy/deploy-image.sh" "$root/deploy/rollback-image.sh
 grep -Eq 'cp.*previous' "$root/deploy/deploy-image.sh"
 grep -Eq 'MCPASTE_SMOKE_TOKEN.*required' "$root/deploy/deploy-image.sh"
 grep -Eq 'MCPASTE_SMOKE_TOKEN' "$root/deploy/health-smoke.sh"
+grep -Eq 'for attempt in \{1\.\.12\}' "$root/deploy/health-smoke.sh"
+grep -Eq 'sleep 5' "$root/deploy/health-smoke.sh"
 grep -Eq -- '--smoke-stdin' "$root/deploy/deploy-image.sh" "$root/.github/workflows/deploy.yml"
 grep -Eq 'read -r endpoint' "$root/deploy/deploy-image.sh"
 postgres_line="$(grep -n 'docker compose.*up -d --wait --wait-timeout 60 postgres' "$root/deploy/deploy-image.sh" | cut -d: -f1 | head -n1 || true)"
