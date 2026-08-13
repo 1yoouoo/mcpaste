@@ -16,7 +16,7 @@ type TxStore interface {
 	DeleteIdempotency(context.Context, string, string, []byte) error
 	PutIdempotency(context.Context, IdempotencyRecord) error
 	InsertWorkspace(context.Context, string, time.Time) error
-	InsertDevice(context.Context, string, Device) error
+	InsertDevice(context.Context, string, Device) (Device, error)
 	InsertCredential(context.Context, string, CredentialRecord) error
 	GetRecovery(context.Context, string, string) (RecoveryRecord, error)
 	PutRecovery(context.Context, string, RecoveryRecord) error
