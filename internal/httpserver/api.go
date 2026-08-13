@@ -29,6 +29,11 @@ func NewApplicationHandler(readiness ReadinessFunc, service identityAPI, proxies
 	mux.HandleFunc("PATCH /v1/devices/{device_id}", server.renameDevice)
 	mux.HandleFunc("DELETE /v1/devices/{device_id}", server.revokeDevice)
 	mux.HandleFunc("POST /v1/recoveries", server.recover)
+	mux.HandleFunc("POST /v1/pastes", server.createPaste)
+	mux.HandleFunc("PATCH /v1/pastes/{paste_id}", server.updatePaste)
+	mux.HandleFunc("DELETE /v1/pastes/{paste_id}", server.deletePaste)
+	mux.HandleFunc("GET /v1/pastes", server.listPastes)
+	mux.HandleFunc("GET /v1/sync", server.sync)
 	return v1MethodGuard(mux)
 }
 
@@ -62,6 +67,10 @@ func v1RouteMethods(path string) ([]string, bool) {
 		return []string{http.MethodPost}, true
 	case "/v1/devices":
 		return []string{http.MethodGet}, true
+	case "/v1/pastes":
+		return []string{http.MethodGet, http.MethodPost}, true
+	case "/v1/sync":
+		return []string{http.MethodGet}, true
 	}
 	parts := strings.Split(strings.TrimPrefix(path, "/v1/"), "/")
 	if len(parts) == 2 && parts[0] == "pairing-requests" && parts[1] != "" {
@@ -74,6 +83,9 @@ func v1RouteMethods(path string) ([]string, bool) {
 		}
 	}
 	if len(parts) == 2 && parts[0] == "devices" && parts[1] != "" {
+		return []string{http.MethodPatch, http.MethodDelete}, true
+	}
+	if len(parts) == 2 && parts[0] == "pastes" && parts[1] != "" {
 		return []string{http.MethodPatch, http.MethodDelete}, true
 	}
 	return nil, false
@@ -310,6 +322,10 @@ func writeError(w http.ResponseWriter, err error) {
 		if seconds, ok := identity.RetryAfterSeconds(err); ok {
 			w.Header().Set("Retry-After", strconv.Itoa(seconds))
 		}
+	case errors.Is(err, identity.ErrCursorExpired):
+		status, code = http.StatusGone, "cursor_expired"
+	case errors.Is(err, identity.ErrUnavailableContent):
+		status, code = http.StatusServiceUnavailable, "unavailable_content"
 	}
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code}})
 }

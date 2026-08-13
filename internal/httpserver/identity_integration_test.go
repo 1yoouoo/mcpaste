@@ -426,6 +426,86 @@ select octet_length(claim_hash) from pairing_requests where id = $1::uuid`, pair
 	}
 }
 
+func TestPasteHTTPContractAndConnectorIsolation(t *testing.T) {
+	h := newIntegrationHarness(t)
+	workspace, _, _ := h.createWorkspace("Paste Mac")
+	fullToken := credential(workspace, "full")
+	connectorToken := credential(workspace, "connector")
+	exact := "  first\r\nsecond\n끝  "
+
+	createKey := h.nextKey()
+	status, _, body := h.request(http.MethodPost, "/v1/pastes", fullToken, createKey, map[string]any{"text": exact})
+	if status != http.StatusCreated {
+		t.Fatalf("create paste status = %d/%q", status, body)
+	}
+	var created identity.PasteResponse
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("decode create paste: %v", err)
+	}
+	if created.Text == nil || *created.Text != exact || created.Deleted || created.Kind != "content" {
+		t.Fatalf("created paste = %#v", created)
+	}
+	status, _, replayBody := h.request(http.MethodPost, "/v1/pastes", fullToken, createKey, map[string]any{"text": exact})
+	if status != http.StatusCreated || !bytes.Equal(body, replayBody) {
+		t.Fatalf("create replay = %d/%q", status, replayBody)
+	}
+
+	updateKey := h.nextKey()
+	status, _, body = h.request(http.MethodPatch, "/v1/pastes/"+created.PasteID, fullToken, updateKey, map[string]any{"text": "updated"})
+	if status != http.StatusOK {
+		t.Fatalf("update paste status = %d/%q", status, body)
+	}
+	status, _, body = h.request(http.MethodGet, "/v1/pastes", fullToken, "", nil)
+	if status != http.StatusOK || !bytes.Contains(body, []byte(`"text":"updated"`)) || bytes.Contains(body, []byte(exact)) {
+		t.Fatalf("paste history status/body = %d/%q", status, body)
+	}
+
+	status, _, body = h.request(http.MethodGet, "/v1/sync?after=0&limit=1", fullToken, "", nil)
+	var firstSync identity.SyncResponse
+	if err := json.Unmarshal(body, &firstSync); err != nil {
+		t.Fatalf("decode sync: %v", err)
+	}
+	if status != http.StatusOK || !firstSync.HasMore || len(firstSync.Events) != 1 || firstSync.Events[0].Text == nil || *firstSync.Events[0].Text != exact {
+		t.Fatalf("sync status/body = %d/%q", status, body)
+	}
+	status, _, body = h.request(http.MethodGet, "/v1/sync?after=not-a-sequence", fullToken, "", nil)
+	if status != http.StatusBadRequest || string(body) != "{\"error\":{\"code\":\"invalid_request\"}}\n" {
+		t.Fatalf("malformed sync status/body = %d/%q", status, body)
+	}
+
+	connectorPaths := []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{http.MethodPost, "/v1/pastes", map[string]any{"text": "connector write"}},
+		{http.MethodPatch, "/v1/pastes/" + created.PasteID, map[string]any{"text": "connector update"}},
+		{http.MethodDelete, "/v1/pastes/" + created.PasteID, nil},
+		{http.MethodGet, "/v1/pastes", nil},
+		{http.MethodGet, "/v1/sync?after=0", nil},
+	}
+	for _, item := range connectorPaths {
+		status, _, body = h.request(item.method, item.path, connectorToken, h.nextKey(), item.body)
+		if status != http.StatusForbidden {
+			t.Fatalf("connector %s %s status/body = %d/%q", item.method, item.path, status, body)
+		}
+	}
+
+	deleteKey := h.nextKey()
+	status, _, body = h.request(http.MethodDelete, "/v1/pastes/"+created.PasteID, fullToken, deleteKey, nil)
+	if status != http.StatusNoContent || len(body) != 0 {
+		t.Fatalf("delete status/body = %d/%q", status, body)
+	}
+	status, _, replayBody = h.request(http.MethodDelete, "/v1/pastes/"+created.PasteID, fullToken, deleteKey, nil)
+	if status != http.StatusNoContent || len(replayBody) != 0 {
+		t.Fatalf("delete replay status/body = %d/%q", status, replayBody)
+	}
+	status, _, body = h.request(http.MethodGet, "/v1/pastes", fullToken, "", nil)
+	if status != http.StatusOK || string(body) != "{\"pastes\":[]}\n" {
+		t.Fatalf("history after delete = %d/%q", status, body)
+	}
+}
+
 func TestPairingExpiryIntegration(t *testing.T) {
 	t.Run("pending request", func(t *testing.T) {
 		h := newIntegrationHarness(t)

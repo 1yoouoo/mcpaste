@@ -20,6 +20,11 @@ type identityAPI interface {
 	RenameDevice(context.Context, identity.Principal, string, string, identity.RenameInput) (identity.Result, error)
 	RevokeDevice(context.Context, identity.Principal, string, string) (identity.Result, error)
 	Recover(context.Context, string, string, identity.RecoveryInput) (identity.Result, error)
+	CreatePaste(context.Context, identity.Principal, string, identity.CreatePasteInput) (identity.Result, error)
+	UpdatePaste(context.Context, identity.Principal, string, string, identity.UpdatePasteInput) (identity.Result, error)
+	DeletePaste(context.Context, identity.Principal, string, string) (identity.Result, error)
+	ListPastes(context.Context, identity.Principal) ([]identity.PasteResponse, error)
+	Sync(context.Context, identity.Principal, int64, int) (identity.SyncResponse, error)
 }
 
 func authenticate(r *http.Request, service identityAPI) (identity.Principal, error) {

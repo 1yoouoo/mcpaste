@@ -55,6 +55,21 @@ func (f *fakeIdentityAPI) RevokeDevice(context.Context, identity.Principal, stri
 func (f *fakeIdentityAPI) Recover(context.Context, string, string, identity.RecoveryInput) (identity.Result, error) {
 	return identity.Result{}, identity.ErrInvalidRecovery
 }
+func (f *fakeIdentityAPI) CreatePaste(context.Context, identity.Principal, string, identity.CreatePasteInput) (identity.Result, error) {
+	return identity.Result{}, identity.ErrForbidden
+}
+func (f *fakeIdentityAPI) UpdatePaste(context.Context, identity.Principal, string, string, identity.UpdatePasteInput) (identity.Result, error) {
+	return identity.Result{}, identity.ErrForbidden
+}
+func (f *fakeIdentityAPI) DeletePaste(context.Context, identity.Principal, string, string) (identity.Result, error) {
+	return identity.Result{}, identity.ErrForbidden
+}
+func (f *fakeIdentityAPI) ListPastes(context.Context, identity.Principal) ([]identity.PasteResponse, error) {
+	return nil, identity.ErrForbidden
+}
+func (f *fakeIdentityAPI) Sync(context.Context, identity.Principal, int64, int) (identity.SyncResponse, error) {
+	return identity.SyncResponse{}, identity.ErrForbidden
+}
 
 func TestWorkspaceCreateUsesStrictJSON(t *testing.T) {
 	largeBody := `{"device_name":"` + strings.Repeat("a", 4060) + `","platform":"macos"}`
