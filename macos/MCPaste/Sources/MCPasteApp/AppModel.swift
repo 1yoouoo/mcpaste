@@ -22,8 +22,10 @@ public final class AppModel: ObservableObject {
     private var currentPasteID: String?
     private let keychain: KeychainStore
     private var session: WorkspaceSession?
+    private var pollingTask: Task<Void, Never>?
     public init() { self.keychain = KeychainStore(); Task { await restore() } }
     public init(keychain: KeychainStore) { self.keychain = keychain }
+    deinit { pollingTask?.cancel() }
 
     public func createWorkspace() async {
         guard let url = URL(string: endpoint), url.scheme == "https", !url.host().isNilOrEmpty else { errorMessage = "Enter a valid HTTPS server address."; return }
@@ -125,6 +127,7 @@ public final class AppModel: ObservableObject {
     private func install(grant: WorkspaceGrant, endpoint: URL, token: String) async throws {
         try keychain.save(KeychainCredential(workspaceID: grant.workspaceID, deviceID: grant.deviceID, scope: "full", endpoint: endpoint.absoluteString, token: token))
         try await installSession(workspaceID: grant.workspaceID, deviceID: grant.deviceID, endpoint: endpoint, token: token)
+        try await refreshSession()
         screen = .pasteboard
     }
 
@@ -136,7 +139,14 @@ public final class AppModel: ObservableObject {
         let coordinator = SyncCoordinator(api: client, cache: cache)
         api = client
         session = WorkspaceSession(cache: cache, coordinator: coordinator, api: client)
-        session?.startPolling()
+        pollingTask?.cancel()
+        pollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 15 * 1_000_000_000) } catch { return }
+                guard let self, !Task.isCancelled else { return }
+                try? await self.refreshSession()
+            }
+        }
         _ = deviceID
     }
 

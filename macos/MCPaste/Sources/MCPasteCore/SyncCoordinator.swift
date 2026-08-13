@@ -35,9 +35,9 @@ public final class SyncCoordinator {
                     didResetCursor = true
                     if let snapshotAPI = api as? SnapshotAPI {
                         let snapshot = try await snapshotAPI.snapshot()
-                        for paste in snapshot.pastes {
-                            try cache.savePaste(CachedPaste(id: paste.id, revisionID: paste.revisionID, sequence: paste.sequence, text: paste.text, deleted: paste.deleted, expiresAt: paste.expiresAt))
-                        }
+                        try cache.replacePastes(snapshot.pastes.map { paste in
+                            CachedPaste(id: paste.id, revisionID: paste.revisionID, sequence: paste.sequence, text: paste.text, deleted: paste.deleted, expiresAt: paste.expiresAt)
+                        })
                         try cache.setCursor(snapshot.cursor)
                         state = .idle
                         return

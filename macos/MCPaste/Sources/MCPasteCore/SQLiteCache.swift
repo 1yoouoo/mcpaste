@@ -32,6 +32,18 @@ public final class SQLiteCache {
         }
     }
 
+    public func replacePastes(_ pastes: [CachedPaste]) throws {
+        try execute("BEGIN TRANSACTION;")
+        do {
+            try execute("DELETE FROM paste_revisions;")
+            for paste in pastes { try savePaste(paste) }
+            try execute("COMMIT;")
+        } catch {
+            _ = try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
     public func paste(id: String) throws -> CachedPaste? {
         var result: CachedPaste?
         try withStatement("SELECT revision_id,sequence,text,deleted,expires_at FROM paste_revisions WHERE paste_id=?;") { statement in
