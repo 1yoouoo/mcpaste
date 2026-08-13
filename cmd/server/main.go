@@ -180,6 +180,8 @@ func runCleanup(ctx context.Context, logger *slog.Logger, service *identity.Serv
 				slog.Int64("idempotency_rows", result.IdempotencyRows),
 				slog.Int64("event_rows", result.EventRows),
 				slog.Int64("rate_limit_rows", result.RateLimitRows),
+				slog.Int64("text_revision_rows", result.TextRevisionRows),
+				slog.Int64("text_paste_rows", result.TextPasteRows),
 			)
 		}
 	}

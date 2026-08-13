@@ -34,6 +34,7 @@ func NewApplicationHandler(readiness ReadinessFunc, service identityAPI, proxies
 	mux.HandleFunc("DELETE /v1/pastes/{paste_id}", server.deletePaste)
 	mux.HandleFunc("GET /v1/pastes", server.listPastes)
 	mux.HandleFunc("GET /v1/sync", server.sync)
+	mux.HandleFunc("GET /v1/events", server.events)
 	return v1MethodGuard(mux)
 }
 
@@ -70,6 +71,8 @@ func v1RouteMethods(path string) ([]string, bool) {
 	case "/v1/pastes":
 		return []string{http.MethodGet, http.MethodPost}, true
 	case "/v1/sync":
+		return []string{http.MethodGet}, true
+	case "/v1/events":
 		return []string{http.MethodGet}, true
 	}
 	parts := strings.Split(strings.TrimPrefix(path, "/v1/"), "/")

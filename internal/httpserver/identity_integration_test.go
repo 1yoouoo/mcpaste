@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -503,6 +504,57 @@ func TestPasteHTTPContractAndConnectorIsolation(t *testing.T) {
 	status, _, body = h.request(http.MethodGet, "/v1/pastes", fullToken, "", nil)
 	if status != http.StatusOK || string(body) != "{\"pastes\":[]}\n" {
 		t.Fatalf("history after delete = %d/%q", status, body)
+	}
+}
+
+func TestSSEEmitsMetadataOnlyAndPollingCatchesUp(t *testing.T) {
+	h := newIntegrationHarness(t)
+	workspace, _, _ := h.createWorkspace("SSE Mac")
+	fullToken := credential(workspace, "full")
+	server := httptest.NewServer(h.handler)
+	defer server.Close()
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/v1/events?after=0", nil)
+	if err != nil {
+		t.Fatalf("new SSE request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+fullToken)
+	responseCh := make(chan *http.Response, 1)
+	go func() {
+		response, requestErr := server.Client().Do(request)
+		if requestErr != nil {
+			return
+		}
+		responseCh <- response
+	}()
+	var response *http.Response
+	select {
+	case response = <-responseCh:
+		if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
+			body, _ := io.ReadAll(response.Body)
+			t.Fatalf("SSE response = %d/%q/%q", response.StatusCode, response.Header.Get("Content-Type"), body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSE connection did not start")
+	}
+
+	status, _, body := h.request(http.MethodPost, "/v1/pastes", fullToken, h.nextKey(), map[string]any{"text": "sse secret body"})
+	if status != http.StatusCreated {
+		t.Fatalf("create SSE paste status/body = %d/%q", status, body)
+	}
+	defer response.Body.Close()
+	buffer := make([]byte, 256)
+	read, err := response.Body.Read(buffer)
+	if err != nil && read == 0 {
+		t.Fatalf("read SSE event: %v", err)
+	}
+	stream := string(buffer[:read])
+	if !strings.Contains(stream, "event: invalidation\n") || !strings.Contains(stream, "data: {\"sequence\":") || strings.Contains(stream, "sse secret body") {
+		t.Fatalf("SSE stream = %q", stream)
+	}
+
+	status, _, syncBody := h.request(http.MethodGet, "/v1/sync?after=0&limit=100", fullToken, "", nil)
+	if status != http.StatusOK || !bytes.Contains(syncBody, []byte("sse secret body")) {
+		t.Fatalf("polling fallback status/body = %d/%q", status, syncBody)
 	}
 }
 

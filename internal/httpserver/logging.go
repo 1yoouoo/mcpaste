@@ -48,6 +48,10 @@ func NewRecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handler 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/v1" || strings.HasPrefix(r.URL.Path, "/v1/") {
+				if r.URL.Path == "/v1/events" {
+					serveStreamingV1WithRecovery(logger, next, w, r)
+					return
+				}
 				serveV1WithRecovery(logger, next, w, r)
 				return
 			}
@@ -60,6 +64,15 @@ func NewRecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handler 
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func serveStreamingV1WithRecovery(logger *slog.Logger, next http.Handler, w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if recover() != nil {
+			logRecoveredPanic(logger, r)
+		}
+	}()
+	next.ServeHTTP(w, r)
 }
 
 func serveV1WithRecovery(logger *slog.Logger, next http.Handler, w http.ResponseWriter, r *http.Request) {
@@ -178,4 +191,13 @@ func (w *statusWriter) WriteHeader(status int) {
 
 func (w *statusWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+func (w *statusWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }

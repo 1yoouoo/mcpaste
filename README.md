@@ -143,6 +143,10 @@ The listener check is read-only. If port 55439 is occupied, stop setup and ident
 
 Phase 2 exposes anonymous workspace, pairing, recovery, and full-device administration under `/v1/`. Authorization and idempotency values use headers. Pairing claim and recovery values use JSON request bodies. Never put tokens, pairing codes, claim secrets, recovery codes, or QR payloads in a URL, command history, log, screenshot, issue, or pull request.
 
+Phase 3 exposes text synchronization under the same versioned API. Full credentials may create, revise, tombstone, list, and sync text pastes; connector credentials are rejected on every write and sync route. `GET /v1/sync?after=<sequence>&limit=<n>` returns ordered durable events and a cursor, while `GET /v1/events?after=<sequence>` sends metadata-only SSE invalidations. Clients should poll `/v1/sync` every 15 seconds when SSE is unavailable. Text bodies are preserved exactly, encrypted at rest, retained for one year, and removed by the cleanup worker after expiry.
+
+The read-only MCP endpoint and local `mcpaste` STDIO connector are the next Phase 3 integration boundary; they must use a separate connector credential and never expose write APIs or paste bodies in logs.
+
 Never use real secrets in environment files, fixtures, logs, screenshots, issues, or pull requests. Use visibly fake deterministic examples such as `example-token-not-real`.
 
 Read the [approved system design](docs/superpowers/specs/2026-08-12-mcpaste-system-design.md) and [implementation roadmap](docs/superpowers/plans/2026-08-12-mcpaste-roadmap.md) for the current direction.
