@@ -58,7 +58,10 @@ jobs:
           GOFLAGS=-mod=readonly go run ./cmd/migrate verify
 
       - name: Verify deployment scripts
-        run: bash deploy/tests/deploy_scripts_test.sh
+        run: |
+          bash deploy/tests/deploy_scripts_test.sh
+          bash deploy/tests/workflow_contract_test.sh
+          bash deploy/compose.production.test.sh
 
       - name: Check formatting
         run: test -z "$(find cmd internal db -type f -name '*.go' -exec gofmt -l {} +)"
