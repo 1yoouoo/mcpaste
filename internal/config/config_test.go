@@ -31,8 +31,8 @@ func TestLoadDefaultsWithRequiredSecrets(t *testing.T) {
 	if cfg.EncryptionKeys == "" {
 		t.Fatal("encryption keyring is empty")
 	}
-	if cfg.CleanupInterval != 15*time.Minute || len(cfg.TrustedProxyCIDRs) != 0 {
-		t.Fatalf("cleanup/proxies = %v/%d", cfg.CleanupInterval, len(cfg.TrustedProxyCIDRs))
+	if cfg.CleanupInterval != time.Minute || cfg.DataDir == "" || len(cfg.TrustedProxyCIDRs) != 0 {
+		t.Fatalf("cleanup/data-dir/proxies = %v/%q/%d", cfg.CleanupInterval, cfg.DataDir, len(cfg.TrustedProxyCIDRs))
 	}
 }
 
@@ -42,6 +42,7 @@ func TestLoadOverrides(t *testing.T) {
 	values["MCPASTE_HTTP_ADDR"] = "127.0.0.1:9090"
 	values["MCPASTE_LOG_LEVEL"] = "debug"
 	values["MCPASTE_CLEANUP_INTERVAL"] = "10m"
+	values["MCPASTE_DATA_DIR"] = "/tmp/mcpaste-config-test"
 	values["MCPASTE_TRUSTED_PROXY_CIDRS"] = "127.0.0.1/32,10.0.0.0/8"
 	cfg, err := Load(mapLookup(values))
 	if err != nil {

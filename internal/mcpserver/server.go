@@ -27,7 +27,7 @@ func NewHandler(service latestPasteService) http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{Name: "mcpaste", Version: version}, nil)
 	server.AddTool(&mcp.Tool{
 		Name:        "get_latest_paste",
-		Description: "Retrieve the latest valid MCPaste text paste.",
+		Description: "Retrieve the latest valid MCPaste text or static-image paste.",
 		InputSchema: map[string]any{"type": "object", "additionalProperties": false},
 	}, getLatestPaste(service))
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
@@ -61,7 +61,14 @@ func getLatestPaste(service latestPasteService) mcp.ToolHandler {
 		}
 		result := &mcp.CallToolResult{StructuredContent: metadata}
 		if latest.Available {
-			result.Content = []mcp.Content{&mcp.TextContent{Text: latest.Text}}
+			if len(latest.Images) > 0 {
+				result.Content = make([]mcp.Content, 0, len(latest.Images))
+				for _, image := range latest.Images {
+					result.Content = append(result.Content, &mcp.ImageContent{Data: image.Bytes, MIMEType: image.MIMEType})
+				}
+			} else {
+				result.Content = []mcp.Content{&mcp.TextContent{Text: latest.Text}}
+			}
 		}
 		return result, nil
 	}

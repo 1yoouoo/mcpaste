@@ -15,6 +15,7 @@ const EventLifetime = 35 * 24 * time.Hour
 const PairingMetadataLifetime = 24 * time.Hour
 const RateLimitRetention = 24 * time.Hour
 const TextHistoryWindow = 30 * 24 * time.Hour
+const ImageLifetime = 24 * time.Hour
 
 var ErrInvalid = errors.New("invalid identity input")
 var ErrUnauthorized = errors.New("unauthorized")
@@ -122,13 +123,15 @@ type RateRule struct {
 }
 
 type CleanupResult struct {
-	RevokedDevices   int64
-	PairingRows      int64
-	IdempotencyRows  int64
-	EventRows        int64
-	RateLimitRows    int64
-	TextRevisionRows int64
-	TextPasteRows    int64
+	RevokedDevices    int64
+	PairingRows       int64
+	IdempotencyRows   int64
+	EventRows         int64
+	RateLimitRows     int64
+	TextRevisionRows  int64
+	TextPasteRows     int64
+	ImageAssetRows    int64
+	ImageRevisionRows int64
 }
 
 type CreatePasteInput struct {
@@ -146,6 +149,22 @@ type TextRevision struct {
 	CreatedAt      time.Time
 	ExpiresAt      time.Time
 	Envelope       secure.Envelope
+	Assets         []ImageAsset
+}
+
+type ImageAsset struct {
+	WorkspaceID string
+	PasteID     string
+	RevisionID  string
+	AssetIndex  int
+	MIMEType    string
+	Width       int
+	Height      int
+	ByteSize    int64
+	ExpiresAt   time.Time
+	StorageKey  string
+	Envelope    secure.Envelope
+	Bytes       []byte
 }
 
 type LatestPaste struct {
@@ -157,6 +176,7 @@ type LatestPaste struct {
 	ExpiresAt      time.Time
 	Text           string
 	Envelope       secure.Envelope
+	Images         []ImageAsset
 }
 
 type SyncEvent struct {

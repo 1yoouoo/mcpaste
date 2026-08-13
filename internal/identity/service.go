@@ -19,6 +19,7 @@ import (
 type Service struct {
 	store           Store
 	keyring         *secure.Keyring
+	imageStore      ImageStore
 	random          secure.Random
 	clock           Clock
 	idempotencyGate idempotencyGate
@@ -60,6 +61,8 @@ const publicIdempotencyScope = "public"
 func NewService(store Store, keyring *secure.Keyring, random secure.Random, clock Clock) *Service {
 	return &Service{store: store, keyring: keyring, random: random, clock: clock}
 }
+
+func (s *Service) SetImageStore(store ImageStore) { s.imageStore = store }
 
 func (s *Service) Authenticate(ctx context.Context, token string) (Principal, error) {
 	parsed, err := secure.ParseCredential(token)
@@ -455,6 +458,27 @@ func (s *Service) Cleanup(ctx context.Context) (CleanupResult, error) {
 		return result, err
 	}
 	result.TextRevisionRows, result.TextPasteRows, err = s.store.PurgeText(ctx, s.clock.Now())
+	if err != nil {
+		return result, err
+	}
+	expiredImages, err := s.store.ListExpiredImages(ctx, s.clock.Now())
+	if err != nil {
+		return result, err
+	}
+	if s.imageStore != nil {
+		seen := make(map[string]struct{})
+		for _, asset := range expiredImages {
+			key := asset.WorkspaceID + ":" + asset.PasteID + ":" + asset.RevisionID
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			if err := s.imageStore.RemoveTree(asset.WorkspaceID, asset.PasteID, asset.RevisionID); err != nil {
+				return result, err
+			}
+			seen[key] = struct{}{}
+		}
+	}
+	result.ImageRevisionRows, result.ImageAssetRows, err = s.store.PurgeImages(ctx, s.clock.Now())
 	return result, err
 }
 

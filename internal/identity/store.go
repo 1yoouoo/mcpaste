@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/1yoouoo/mcpaste/internal/images"
 	"github.com/1yoouoo/mcpaste/internal/secure"
 )
 
@@ -13,6 +14,8 @@ type Store interface {
 	ConsumeRateLimit(context.Context, RateRule, []byte, time.Time) (RateDecision, error)
 	Cleanup(context.Context, time.Time) (CleanupResult, error)
 	PurgeText(context.Context, time.Time) (int64, int64, error)
+	PurgeImages(context.Context, time.Time) (int64, int64, error)
+	ListExpiredImages(context.Context, time.Time) ([]ImageAsset, error)
 }
 
 type TxStore interface {
@@ -37,9 +40,20 @@ type TxStore interface {
 	RevokeDevice(context.Context, string, string, time.Time) error
 	InsertEvent(context.Context, string, string, string, time.Time) error
 	InsertPaste(context.Context, string, string, time.Time) error
+	SetPasteKind(context.Context, string, string, string) error
 	AppendTextRevision(context.Context, string, string, string, string, string, secure.Envelope, time.Time, time.Time) (TextRevision, error)
+	AppendImageRevision(context.Context, string, string, string, string, []ImageAsset, time.Time, time.Time) (TextRevision, error)
+	ListImageAssets(context.Context, string, string, string) ([]ImageAsset, error)
 	ListPastes(context.Context, string, time.Time, time.Time) ([]TextRevision, error)
 	Sync(context.Context, string, int64, int, time.Time) (SyncResult, error)
 	LatestPaste(context.Context, string, time.Time) (LatestPaste, error)
 	TouchPaste(context.Context, string, string, time.Time) error
+}
+
+type ImageStore interface {
+	Put(string, string, string, int, []byte) (images.StoredAsset, error)
+	Open(images.StoredAsset) ([]byte, error)
+	Remove(images.StoredAsset) error
+	RemoveTree(string, string, string) error
+	RemovePaste(string, string) error
 }

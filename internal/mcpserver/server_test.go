@@ -65,6 +65,29 @@ func TestMCPReturnsStructuredEmptyResult(t *testing.T) {
 	}
 }
 
+func TestMCPReturnsOrderedImageContent(t *testing.T) {
+	service := &fakeLatestPasteService{latest: identity.LatestPaste{
+		Available: true,
+		PasteID:   "00000000-0000-4000-8000-000000000603",
+		Images: []identity.ImageAsset{
+			{AssetIndex: 0, MIMEType: "image/png", Bytes: []byte{1, 2}},
+			{AssetIndex: 1, MIMEType: "image/jpeg", Bytes: []byte{3, 4}},
+		},
+	}}
+	session := connectTestClient(t, service)
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_latest_paste", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Content) != 2 {
+		t.Fatalf("content = %#v", result.Content)
+	}
+	first, ok := result.Content[0].(*mcp.ImageContent)
+	if !ok || first.MIMEType != "image/png" || string(first.Data) != string([]byte{1, 2}) {
+		t.Fatalf("first image = %#v", result.Content[0])
+	}
+}
+
 func connectTestClient(t *testing.T, service *fakeLatestPasteService) *mcp.ClientSession {
 	t.Helper()
 	handler := NewHandler(service)

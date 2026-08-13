@@ -32,6 +32,8 @@ func NewApplicationHandler(readiness ReadinessFunc, service identityAPI, proxies
 	mux.HandleFunc("DELETE /v1/devices/{device_id}", server.revokeDevice)
 	mux.HandleFunc("POST /v1/recoveries", server.recover)
 	mux.HandleFunc("POST /v1/pastes", server.createPaste)
+	mux.HandleFunc("POST /v1/image-pastes", server.createImagePaste)
+	mux.HandleFunc("GET /v1/image-pastes/{paste_id}/{asset_index}", server.downloadImage)
 	mux.HandleFunc("PATCH /v1/pastes/{paste_id}", server.updatePaste)
 	mux.HandleFunc("DELETE /v1/pastes/{paste_id}", server.deletePaste)
 	mux.HandleFunc("GET /v1/pastes", server.listPastes)
@@ -74,6 +76,8 @@ func v1RouteMethods(path string) ([]string, bool) {
 		return []string{http.MethodGet}, true
 	case "/v1/pastes":
 		return []string{http.MethodGet, http.MethodPost}, true
+	case "/v1/image-pastes":
+		return []string{http.MethodPost}, true
 	case "/v1/sync":
 		return []string{http.MethodGet}, true
 	case "/v1/events":
@@ -96,6 +100,9 @@ func v1RouteMethods(path string) ([]string, bool) {
 	}
 	if len(parts) == 2 && parts[0] == "pastes" && parts[1] != "" {
 		return []string{http.MethodPatch, http.MethodDelete}, true
+	}
+	if len(parts) == 3 && parts[0] == "image-pastes" && parts[1] != "" && parts[2] != "" {
+		return []string{http.MethodGet}, true
 	}
 	return nil, false
 }

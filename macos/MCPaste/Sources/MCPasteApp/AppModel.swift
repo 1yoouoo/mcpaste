@@ -46,6 +46,17 @@ public final class AppModel: ObservableObject {
         do { try await api.deletePaste(id: currentPasteID); self.currentPasteID = nil; draft = "" } catch { errorMessage = "Paste could not be deleted." }
     }
 
+    public func uploadImages(_ sourceData: [Data]) async {
+        guard let api else { return }
+        pending = true; defer { pending = false }
+        do {
+            let normalizer = ImageNormalizer()
+            let normalized = try sourceData.map { try normalizer.normalize($0) }
+            let record = try await api.uploadImages(normalized)
+            currentPasteID = record.id
+        } catch { errorMessage = "Images could not be uploaded." }
+    }
+
     public func completeOnboarding() { screen = .pasteboard }
     public func setPending(_ value: Bool) { pending = value }
 }

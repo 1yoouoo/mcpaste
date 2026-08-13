@@ -19,6 +19,7 @@ import (
 	"github.com/1yoouoo/mcpaste/internal/httpserver"
 	"github.com/1yoouoo/mcpaste/internal/identity"
 	identitypostgres "github.com/1yoouoo/mcpaste/internal/identity/postgres"
+	"github.com/1yoouoo/mcpaste/internal/images"
 	"github.com/1yoouoo/mcpaste/internal/secure"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -57,6 +58,11 @@ func run() error {
 		return errors.New("load encryption keyring")
 	}
 	service := identity.NewService(identitypostgres.New(pool), keyring, secure.SystemRandom{}, identity.RealClock{})
+	imageStore, err := images.NewFileStore(cfg.DataDir, keyring)
+	if err != nil {
+		return errors.New("load image storage")
+	}
+	service.SetImageStore(imageStore)
 	application := httpserver.NewApplicationHandler(
 		databaseReadiness(pool, available),
 		service,
@@ -182,6 +188,8 @@ func runCleanup(ctx context.Context, logger *slog.Logger, service *identity.Serv
 				slog.Int64("rate_limit_rows", result.RateLimitRows),
 				slog.Int64("text_revision_rows", result.TextRevisionRows),
 				slog.Int64("text_paste_rows", result.TextPasteRows),
+				slog.Int64("image_revision_rows", result.ImageRevisionRows),
+				slog.Int64("image_asset_rows", result.ImageAssetRows),
 			)
 		}
 	}

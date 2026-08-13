@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ type Config struct {
 	DatabaseURL       string
 	ActiveKeyID       string
 	EncryptionKeys    string
+	DataDir           string
 	CleanupInterval   time.Duration
 	TrustedProxyCIDRs []*net.IPNet
 }
@@ -43,7 +45,8 @@ func Load(lookup LookupEnv) (Config, error) {
 		Environment:     Development,
 		HTTPAddr:        ":8080",
 		LogLevel:        slog.LevelInfo,
-		CleanupInterval: 15 * time.Minute,
+		DataDir:         defaultDataDir(),
+		CleanupInterval: time.Minute,
 	}
 	if value, ok := nonEmpty(lookup, "MCPASTE_ENV"); ok {
 		switch Environment(value) {
@@ -84,6 +87,14 @@ func Load(lookup LookupEnv) (Config, error) {
 	}
 	cfg.ActiveKeyID = activeKeyID
 	cfg.EncryptionKeys = keyring
+	if value, ok := nonEmpty(lookup, "MCPASTE_DATA_DIR"); ok {
+		if !filepath.IsAbs(value) {
+			return Config{}, fmt.Errorf("MCPASTE_DATA_DIR must be an absolute path")
+		}
+		cfg.DataDir = filepath.Clean(value)
+	} else if cfg.Environment == Production {
+		return Config{}, fmt.Errorf("MCPASTE_DATA_DIR is required in production")
+	}
 	if value, ok := nonEmpty(lookup, "MCPASTE_CLEANUP_INTERVAL"); ok {
 		parsed, err := time.ParseDuration(value)
 		if err != nil || parsed < time.Minute || parsed > time.Hour {
@@ -104,6 +115,14 @@ func Load(lookup LookupEnv) (Config, error) {
 		return Config{}, fmt.Errorf("MCPASTE_TRUSTED_PROXY_CIDRS is required in production")
 	}
 	return cfg, nil
+}
+
+func defaultDataDir() string {
+	value, err := filepath.Abs("./data")
+	if err != nil {
+		return "./data"
+	}
+	return filepath.Clean(value)
 }
 
 func nonEmpty(lookup LookupEnv, key string) (string, bool) {

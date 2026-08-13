@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/1yoouoo/mcpaste/internal/images"
 	"github.com/1yoouoo/mcpaste/internal/secure"
 )
 
@@ -78,7 +79,7 @@ func (s *Service) DeletePaste(ctx context.Context, principal Principal, pasteID,
 	if err != nil {
 		return Result{}, err
 	}
-	return s.mutate(ctx, principal.WorkspaceID, "paste.delete:"+pasteID, idempotencyKey, principal.WorkspaceID, []byte("{}"), 204,
+	result, err := s.mutate(ctx, principal.WorkspaceID, "paste.delete:"+pasteID, idempotencyKey, principal.WorkspaceID, []byte("{}"), 204,
 		func(tx TxStore, now time.Time) (any, string, error) {
 			expiresAt := now.AddDate(1, 0, 0)
 			if _, err := tx.AppendTextRevision(ctx, principal.WorkspaceID, pasteID, revisionID, "tombstone", "paste.deleted", secure.Envelope{}, now, expiresAt); err != nil {
@@ -86,6 +87,10 @@ func (s *Service) DeletePaste(ctx context.Context, principal Principal, pasteID,
 			}
 			return nil, principal.WorkspaceID, nil
 		})
+	if err == nil && s.imageStore != nil {
+		_ = s.imageStore.RemovePaste(principal.WorkspaceID, pasteID)
+	}
+	return result, err
 }
 
 func (s *Service) ListPastes(ctx context.Context, principal Principal) ([]PasteResponse, error) {
@@ -104,6 +109,20 @@ func (s *Service) ListPastes(ctx context.Context, principal Principal) ([]PasteR
 	}
 	result := make([]PasteResponse, 0, len(revisions))
 	for _, revision := range revisions {
+		if revision.RevisionKind == "image_bundle" {
+			var assets []ImageAsset
+			err := s.store.WithinTx(ctx, func(tx TxStore) error {
+				var err error
+				assets, err = tx.ListImageAssets(ctx, principal.WorkspaceID, revision.PasteID, revision.RevisionID)
+				return err
+			})
+			if err != nil {
+				return nil, err
+			}
+			revision.Assets = assets
+			result = append(result, imageResponse(revision))
+			continue
+		}
 		text, err := s.decryptText(principal.WorkspaceID, revision)
 		if err != nil {
 			return nil, err
@@ -133,6 +152,18 @@ func (s *Service) Sync(ctx context.Context, principal Principal, after int64, li
 			RevisionID: event.RevisionID, Kind: event.RevisionKind, ServerSequence: event.ServerSequence,
 			CreatedAt: wireTime(event.CreatedAt), ExpiresAt: wireTime(event.ExpiresAt), Deleted: event.RevisionKind == "tombstone",
 		}
+		if event.RevisionKind == "image_bundle" {
+			var assets []ImageAsset
+			err := s.store.WithinTx(ctx, func(tx TxStore) error {
+				var err error
+				assets, err = tx.ListImageAssets(ctx, principal.WorkspaceID, event.PasteID, event.RevisionID)
+				return err
+			})
+			if err != nil {
+				return SyncResponse{}, err
+			}
+			item.Assets = imageAssetResponses(assets)
+		}
 		if event.RevisionKind == "content" {
 			text, err := s.decryptText(principal.WorkspaceID, TextRevision{
 				WorkspaceID: principal.WorkspaceID, PasteID: event.PasteID, RevisionID: event.RevisionID,
@@ -147,6 +178,14 @@ func (s *Service) Sync(ctx context.Context, principal Principal, after int64, li
 		response.Events = append(response.Events, item)
 	}
 	return response, nil
+}
+
+func imageAssetResponses(assets []ImageAsset) []ImageAssetResponse {
+	result := make([]ImageAssetResponse, 0, len(assets))
+	for _, asset := range assets {
+		result = append(result, ImageAssetResponse{AssetIndex: asset.AssetIndex, MIMEType: asset.MIMEType, Width: asset.Width, Height: asset.Height, ByteSize: asset.ByteSize})
+	}
+	return result
 }
 
 func (s *Service) LatestPaste(ctx context.Context, principal Principal) (LatestPaste, error) {
@@ -164,9 +203,26 @@ func (s *Service) LatestPaste(ctx context.Context, principal Principal) (LatestP
 		if err != nil {
 			return err
 		}
-		latest.Text, err = s.decryptEnvelope(principal.WorkspaceID, latest.PasteID, latest.RevisionID, latest.Envelope)
-		if err != nil {
-			return err
+		if !latest.Available {
+			return nil
+		}
+		if len(latest.Images) == 0 {
+			latest.Text, err = s.decryptEnvelope(principal.WorkspaceID, latest.PasteID, latest.RevisionID, latest.Envelope)
+			if err != nil {
+				return err
+			}
+		}
+		if latest.RevisionID != "" && len(latest.Images) > 0 {
+			if s.imageStore == nil {
+				return ErrUnavailableContent
+			}
+			for index := range latest.Images {
+				asset := latest.Images[index]
+				latest.Images[index].Bytes, err = s.imageStore.Open(images.StoredAsset{StorageKey: asset.StorageKey, Envelope: asset.Envelope})
+				if err != nil {
+					return ErrUnavailableContent
+				}
+			}
 		}
 		return tx.TouchPaste(ctx, principal.WorkspaceID, latest.PasteID, s.clock.Now())
 	})

@@ -57,6 +57,30 @@ public final class MCPasteAPI: SyncAPI {
         _ = try await sendVoid(path: "/v1/pastes/\(id)", method: "DELETE", idempotencyKey: idempotencyKey)
     }
 
+    public func uploadImages(_ images: [NormalizedImage], idempotencyKey: String = UUID().uuidString) async throws -> PasteRecord {
+        guard !images.isEmpty else { throw APIError.invalidResponse }
+        let boundary = "MCPaste-\(UUID().uuidString)"
+        var body = Data()
+        for (index, image) in images.enumerated() {
+            body.append(Data("--\(boundary)\r\n".utf8))
+            body.append(Data("Content-Disposition: form-data; name=\"images\"; filename=\"asset-\(index).png\"\r\n".utf8))
+            body.append(Data("Content-Type: \(image.mimeType)\r\n".utf8))
+            body.append(Data("X-MCPaste-Width: \(image.width)\r\nX-MCPaste-Height: \(image.height)\r\n\r\n".utf8))
+            body.append(image.data)
+            body.append(Data("\r\n".utf8))
+        }
+        body.append(Data("--\(boundary)--\r\n".utf8))
+        guard let url = URL(string: "/v1/image-pastes", relativeTo: baseURL) else { throw APIError.invalidResponse }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
+        let (data, _) = try await perform(request)
+        do { return try decoder.decode(PasteRecord.self, from: data) } catch { throw APIError.invalidResponse }
+    }
+
     public func listPastes() async throws -> [PasteRecord] { let response: PasteListResponse = try await send(path: "/v1/pastes"); return response.pastes }
 
     public func sync(after: Int64) async throws -> SyncPage { try await send(path: "/v1/sync?after=\(after)") }

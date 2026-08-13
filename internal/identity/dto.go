@@ -55,27 +55,37 @@ type ApprovalResponse struct {
 }
 
 type PasteResponse struct {
-	PasteID        string    `json:"paste_id"`
-	RevisionID     string    `json:"revision_id"`
-	Kind           string    `json:"kind"`
-	ServerSequence int64     `json:"server_sequence"`
-	CreatedAt      time.Time `json:"created_at"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	Deleted        bool      `json:"deleted"`
-	Text           *string   `json:"text,omitempty"`
+	PasteID        string               `json:"paste_id"`
+	RevisionID     string               `json:"revision_id"`
+	Kind           string               `json:"kind"`
+	ServerSequence int64                `json:"server_sequence"`
+	CreatedAt      time.Time            `json:"created_at"`
+	ExpiresAt      time.Time            `json:"expires_at"`
+	Deleted        bool                 `json:"deleted"`
+	Text           *string              `json:"text,omitempty"`
+	Assets         []ImageAssetResponse `json:"assets,omitempty"`
+}
+
+type ImageAssetResponse struct {
+	AssetIndex int    `json:"asset_index"`
+	MIMEType   string `json:"mime_type"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
+	ByteSize   int64  `json:"byte_size"`
 }
 
 type SyncEventResponse struct {
-	Sequence       int64     `json:"sequence"`
-	EventType      string    `json:"event_type"`
-	PasteID        string    `json:"paste_id"`
-	RevisionID     string    `json:"revision_id"`
-	Kind           string    `json:"kind"`
-	ServerSequence int64     `json:"server_sequence"`
-	CreatedAt      time.Time `json:"created_at"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	Deleted        bool      `json:"deleted"`
-	Text           *string   `json:"text,omitempty"`
+	Sequence       int64                `json:"sequence"`
+	EventType      string               `json:"event_type"`
+	PasteID        string               `json:"paste_id"`
+	RevisionID     string               `json:"revision_id"`
+	Kind           string               `json:"kind"`
+	ServerSequence int64                `json:"server_sequence"`
+	CreatedAt      time.Time            `json:"created_at"`
+	ExpiresAt      time.Time            `json:"expires_at"`
+	Deleted        bool                 `json:"deleted"`
+	Text           *string              `json:"text,omitempty"`
+	Assets         []ImageAssetResponse `json:"assets,omitempty"`
 }
 
 type SyncResponse struct {
