@@ -6,9 +6,6 @@ struct PastePopoverView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack { Text("Paste").font(.headline); Spacer(); if model.pending || model.pendingCount > 0 { ProgressView().controlSize(.small).accessibilityLabel("Pending sync") } }
-            if !model.recoveryCode.isEmpty {
-                Text("Save this recovery code: \(model.recoveryCode)").font(.caption).textSelection(.enabled)
-            }
             TextEditor(text: $model.draft).font(.body).frame(minHeight: 150).accessibilityLabel("Paste text")
             if !model.history.isEmpty {
                 Text("Recent history").font(.subheadline)

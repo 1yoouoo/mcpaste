@@ -11,7 +11,11 @@ let package = Package(
     targets: [
         .systemLibrary(name: "CSQLite", path: "Sources/CSQLite"),
         .target(name: "MCPasteCore", dependencies: ["CSQLite"]),
-        .executableTarget(name: "MCPasteApp", dependencies: ["MCPasteCore"]),
+        .executableTarget(
+            name: "MCPasteApp",
+            dependencies: ["MCPasteCore"],
+            resources: [.process("Resources")]
+        ),
         .testTarget(name: "MCPasteCoreTests", dependencies: ["MCPasteCore"]),
         .testTarget(name: "MCPasteAppTests", dependencies: ["MCPasteApp"])
     ]

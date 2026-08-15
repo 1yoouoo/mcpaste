@@ -17,6 +17,13 @@ const RateLimitRetention = 24 * time.Hour
 const TextHistoryWindow = 30 * 24 * time.Hour
 const ImageLifetime = 24 * time.Hour
 
+const (
+	RevisionContent          = "content"
+	RevisionTombstone        = "tombstone"
+	RevisionImageBundle      = "image_bundle"
+	RevisionAttachmentBundle = "attachment_bundle"
+)
+
 var ErrInvalid = errors.New("invalid identity input")
 var ErrUnauthorized = errors.New("unauthorized")
 var ErrForbidden = errors.New("forbidden")
@@ -25,6 +32,7 @@ var ErrIdempotencyConflict = errors.New("idempotency conflict")
 var ErrPairingPending = errors.New("pairing pending")
 var ErrPairingApproved = errors.New("pairing already approved")
 var ErrPairingExpired = errors.New("pairing expired")
+var ErrPairingDenied = errors.New("pairing denied")
 var ErrInvalidClaim = errors.New("invalid claim")
 var ErrInvalidRecovery = errors.New("invalid recovery")
 var ErrRateLimited = errors.New("rate limited")
@@ -165,6 +173,19 @@ type ImageAsset struct {
 	StorageKey  string
 	Envelope    secure.Envelope
 	Bytes       []byte
+}
+
+type PasteAggregate struct {
+	PasteID              string
+	RevisionID           string
+	AttachmentRevisionID string
+	ServerSequence       int64
+	CreatedAt            time.Time
+	TextExpiresAt        time.Time
+	AttachmentExpiresAt  time.Time
+	TextRevision         *TextRevision
+	AttachmentRevision   *TextRevision
+	Deleted              bool
 }
 
 type LatestPaste struct {

@@ -36,6 +36,13 @@ mcpaste-server
 DerivedData/
 xcuserdata/
 *.xcuserstate
+macos/MCPaste/Sources/MCPasteCore/EndpointConfiguration.generated.swift
+
+# Local AI workflow artifacts
+/.superpowers/
+/.codex/
+/.claude/
+/docs/superpowers/
 
 # General build and dependency output
 *.log

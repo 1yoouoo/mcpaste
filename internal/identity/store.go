@@ -14,8 +14,15 @@ type Store interface {
 	ConsumeRateLimit(context.Context, RateRule, []byte, time.Time) (RateDecision, error)
 	Cleanup(context.Context, time.Time) (CleanupResult, error)
 	PurgeText(context.Context, time.Time) (int64, int64, error)
-	PurgeImages(context.Context, time.Time, []ImageAsset) (int64, int64, error)
-	ListExpiredImages(context.Context, time.Time, int) ([]ImageAsset, error)
+	ListExpiredImageRevisions(context.Context, time.Time, int) ([]ExpiredImageRevision, error)
+	PurgeImageRevisions(context.Context, time.Time, []ExpiredImageRevision) (int64, int64, error)
+}
+
+type ExpiredImageRevision struct {
+	WorkspaceID string
+	PasteID     string
+	RevisionID  string
+	Assets      []ImageAsset
 }
 
 type TxStore interface {
@@ -31,10 +38,13 @@ type TxStore interface {
 	InsertPairing(context.Context, Pairing) error
 	GetPairingByID(context.Context, string, string, time.Time) (Pairing, error)
 	GetPairingByShortCode(context.Context, string, string, time.Time) (Pairing, error)
+	GetPairingForStatus(context.Context, string, []byte, time.Time) (Pairing, error)
 	LockPairingForApproval(context.Context, string, string, time.Time) (Pairing, error)
 	ApprovePairing(context.Context, string, string, string, string, time.Time, time.Time, secure.Envelope, time.Time) error
 	LockPairingForClaim(context.Context, string, []byte, time.Time) (Pairing, error)
 	MarkPairingClaimed(context.Context, string, time.Time) error
+	LockPairingForDenial(context.Context, string, string, time.Time) (Pairing, error)
+	InvalidatePendingPairing(context.Context, string, time.Time) error
 	ListDevices(context.Context, string, string) ([]Device, error)
 	RenameDevice(context.Context, string, string, string, time.Time) (Device, error)
 	RevokeDevice(context.Context, string, string, time.Time) error
@@ -43,7 +53,13 @@ type TxStore interface {
 	SetPasteKind(context.Context, string, string, string) error
 	AppendTextRevision(context.Context, string, string, string, string, string, secure.Envelope, time.Time, time.Time) (TextRevision, error)
 	AppendImageRevision(context.Context, string, string, string, string, []ImageAsset, time.Time, time.Time) (TextRevision, error)
+	AppendAttachmentRevision(context.Context, string, string, string, string, []ImageAsset, time.Time, time.Time) (TextRevision, error)
 	ListImageAssets(context.Context, string, string, string) ([]ImageAsset, error)
+	PasteAggregate(context.Context, string, string, time.Time) (PasteAggregate, error)
+	ListPasteAggregates(context.Context, string, time.Time, time.Time) ([]PasteAggregate, error)
+	SnapshotAggregates(context.Context, string, time.Time) (int64, []PasteAggregate, error)
+	LatestPasteAggregate(context.Context, string, time.Time) (PasteAggregate, error)
+	CurrentAttachmentAsset(context.Context, string, string, int, time.Time) (ImageAsset, error)
 	ListPastes(context.Context, string, time.Time, time.Time) ([]TextRevision, error)
 	Snapshot(context.Context, string, time.Time) (SnapshotResult, error)
 	Sync(context.Context, string, int64, int, time.Time) (SyncResult, error)

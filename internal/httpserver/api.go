@@ -27,6 +27,8 @@ func NewApplicationHandler(readiness ReadinessFunc, service identityAPI, proxies
 	mux.HandleFunc("GET /v1/pairing-requests/{pairing_id}", server.getPairing)
 	mux.HandleFunc("POST /v1/pairing-requests/{pairing_id}/approve", server.approvePairing)
 	mux.HandleFunc("POST /v1/pairing-requests/{pairing_id}/claim", server.claimPairing)
+	mux.HandleFunc("POST /v1/pairing-requests/{pairing_id}/status", server.pairingStatus)
+	mux.HandleFunc("POST /v1/pairing-requests/{pairing_id}/deny", server.denyPairing)
 	mux.HandleFunc("GET /v1/devices", server.listDevices)
 	mux.HandleFunc("PATCH /v1/devices/{device_id}", server.renameDevice)
 	mux.HandleFunc("DELETE /v1/devices/{device_id}", server.revokeDevice)
@@ -34,6 +36,8 @@ func NewApplicationHandler(readiness ReadinessFunc, service identityAPI, proxies
 	mux.HandleFunc("POST /v1/pastes", server.createPaste)
 	mux.HandleFunc("POST /v1/image-pastes", server.createImagePaste)
 	mux.HandleFunc("GET /v1/image-pastes/{paste_id}/{asset_index}", server.downloadImage)
+	mux.HandleFunc("PUT /v1/pastes/{paste_id}/attachments", server.replaceAttachments)
+	mux.HandleFunc("GET /v1/pastes/{paste_id}/attachments/{asset_index}", server.downloadAttachment)
 	mux.HandleFunc("PATCH /v1/pastes/{paste_id}", server.updatePaste)
 	mux.HandleFunc("DELETE /v1/pastes/{paste_id}", server.deletePaste)
 	mux.HandleFunc("GET /v1/pastes", server.listPastes)
@@ -94,7 +98,7 @@ func v1RouteMethods(path string) ([]string, bool) {
 	}
 	if len(parts) == 3 && parts[0] == "pairing-requests" && parts[1] != "" {
 		switch parts[2] {
-		case "approve", "claim":
+		case "approve", "claim", "status", "deny":
 			return []string{http.MethodPost}, true
 		}
 	}
@@ -103,6 +107,12 @@ func v1RouteMethods(path string) ([]string, bool) {
 	}
 	if len(parts) == 2 && parts[0] == "pastes" && parts[1] != "" {
 		return []string{http.MethodPatch, http.MethodDelete}, true
+	}
+	if len(parts) == 3 && parts[0] == "pastes" && parts[1] != "" && parts[2] == "attachments" {
+		return []string{http.MethodPut}, true
+	}
+	if len(parts) == 4 && parts[0] == "pastes" && parts[1] != "" && parts[2] == "attachments" && parts[3] != "" {
+		return []string{http.MethodGet}, true
 	}
 	if len(parts) == 3 && parts[0] == "image-pastes" && parts[1] != "" && parts[2] != "" {
 		return []string{http.MethodGet}, true
@@ -214,6 +224,43 @@ func (s *apiServer) claimPairing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.identity.ClaimPairing(r.Context(), clientIP(r, s.proxies), r.PathValue("pairing_id"), input.ClaimSecret)
+	writeResultOrError(w, result, err)
+}
+
+func (s *apiServer) pairingStatus(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		ClaimSecret string `json:"claim_secret"`
+	}
+	if err := decodeJSON(w, r, &input); err != nil {
+		writeError(w, err)
+		return
+	}
+	response, err := s.identity.PairingStatus(r.Context(), clientIP(r, s.proxies), r.PathValue("pairing_id"), input.ClaimSecret)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *apiServer) denyPairing(w http.ResponseWriter, r *http.Request) {
+	principal, err := authenticate(r, s.identity)
+	if err == nil {
+		err = requireFull(principal)
+	}
+	var idempotencyKey string
+	if err == nil {
+		idempotencyKey, err = oneHeader(r, "Idempotency-Key")
+	}
+	var input struct{}
+	if err == nil {
+		err = decodeJSON(w, r, &input)
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := s.identity.DenyPairing(r.Context(), principal, r.PathValue("pairing_id"), idempotencyKey)
 	writeResultOrError(w, result, err)
 }
 
@@ -330,6 +377,8 @@ func writeError(w http.ResponseWriter, err error) {
 		status, code = http.StatusConflict, "pairing_pending"
 	case errors.Is(err, identity.ErrPairingApproved):
 		status, code = http.StatusConflict, "pairing_already_approved"
+	case errors.Is(err, identity.ErrPairingDenied):
+		status, code = http.StatusGone, "pairing_denied"
 	case errors.Is(err, identity.ErrPairingExpired):
 		status, code = http.StatusGone, "pairing_expired"
 	case errors.Is(err, identity.ErrInvalidClaim):

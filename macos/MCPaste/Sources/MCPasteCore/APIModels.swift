@@ -5,6 +5,24 @@ public struct CreatePasteRequest: Codable, Equatable {
     public init(text: String) { self.text = text }
 }
 
+public struct PasteAttachment: Codable, Equatable, Identifiable {
+    public let assetIndex: Int
+    public let mimeType: String
+    public let width: Int
+    public let height: Int
+    public let byteSize: Int64
+    public let expiresAt: Date
+    public var id: Int { assetIndex }
+
+    enum CodingKeys: String, CodingKey {
+        case assetIndex = "asset_index"
+        case mimeType = "mime_type"
+        case width, height
+        case byteSize = "byte_size"
+        case expiresAt = "expires_at"
+    }
+}
+
 public struct PasteRecord: Codable, Equatable, Identifiable {
     public let id: String
     public let revisionID: String
@@ -13,11 +31,44 @@ public struct PasteRecord: Codable, Equatable, Identifiable {
     public let text: String?
     public let deleted: Bool
     public let expiresAt: Date
-    public init(id: String, revisionID: String, sequence: Int64, kind: String = "content", text: String?, deleted: Bool, expiresAt: Date) {
+    public let attachmentRevisionID: String?
+    public let attachments: [PasteAttachment]
+    public init(
+        id: String,
+        revisionID: String,
+        sequence: Int64,
+        kind: String = "content",
+        text: String?,
+        deleted: Bool,
+        expiresAt: Date,
+        attachmentRevisionID: String? = nil,
+        attachments: [PasteAttachment] = []
+    ) {
         self.id = id; self.revisionID = revisionID; self.sequence = sequence; self.kind = kind
         self.text = text; self.deleted = deleted; self.expiresAt = expiresAt
+        self.attachmentRevisionID = attachmentRevisionID; self.attachments = attachments
     }
-    enum CodingKeys: String, CodingKey { case id = "paste_id", revisionID = "revision_id", sequence = "server_sequence", kind, text, deleted, expiresAt = "expires_at" }
+    enum CodingKeys: String, CodingKey {
+        case id = "paste_id"
+        case revisionID = "revision_id"
+        case sequence = "server_sequence"
+        case kind, text, deleted
+        case expiresAt = "expires_at"
+        case attachmentRevisionID = "attachment_revision_id"
+        case attachments = "assets"
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        revisionID = try values.decode(String.self, forKey: .revisionID)
+        sequence = try values.decode(Int64.self, forKey: .sequence)
+        kind = try values.decode(String.self, forKey: .kind)
+        text = try values.decodeIfPresent(String.self, forKey: .text)
+        deleted = try values.decode(Bool.self, forKey: .deleted)
+        expiresAt = try values.decode(Date.self, forKey: .expiresAt)
+        attachmentRevisionID = try values.decodeIfPresent(String.self, forKey: .attachmentRevisionID)
+        attachments = try values.decodeIfPresent([PasteAttachment].self, forKey: .attachments) ?? []
+    }
 }
 
 public struct SnapshotPage: Decodable, Equatable {
@@ -29,6 +80,7 @@ public struct SnapshotPage: Decodable, Equatable {
 public enum SyncEventKind: String, Codable {
     case content
     case tombstone
+    case attachmentBundle = "attachment_bundle"
     case imageBundle = "image_bundle"
 }
 
@@ -39,11 +91,27 @@ public struct SyncEvent: Codable, Equatable {
     public let kind: SyncEventKind
     public let text: String?
     public let deleted: Bool
-    public init(sequence: Int64, pasteID: String, revisionID: String, kind: SyncEventKind, text: String?, deleted: Bool) {
+    public let attachments: [PasteAttachment]?
+    public init(
+        sequence: Int64,
+        pasteID: String,
+        revisionID: String,
+        kind: SyncEventKind,
+        text: String?,
+        deleted: Bool,
+        attachments: [PasteAttachment]? = nil
+    ) {
         self.sequence = sequence; self.pasteID = pasteID; self.revisionID = revisionID
         self.kind = kind; self.text = text; self.deleted = deleted
+        self.attachments = attachments
     }
-    enum CodingKeys: String, CodingKey { case sequence, pasteID = "paste_id", revisionID = "revision_id", kind, text, deleted }
+    enum CodingKeys: String, CodingKey {
+        case sequence
+        case pasteID = "paste_id"
+        case revisionID = "revision_id"
+        case kind, text, deleted
+        case attachments = "assets"
+    }
 }
 
 public struct SyncPage: Codable, Equatable {

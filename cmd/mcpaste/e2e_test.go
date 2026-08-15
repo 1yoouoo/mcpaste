@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,7 +47,7 @@ func TestRealStdioProcessRetrievesExactRemoteMCPTextAndEmptyResult(t *testing.T)
 		t.Fatalf("SaveCredential() error = %v", err)
 	}
 	binary := filepath.Join(t.TempDir(), "mcpaste")
-	build := exec.Command("go", "build", "-o", binary, ".")
+	build := exec.Command("go", "build", "-ldflags", fmt.Sprintf("-X=github.com/1yoouoo/mcpaste/internal/connector.BuildEndpoint=%s", remote.URL), "-o", binary, ".")
 	if _, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build mcpaste process: %v", err)
 	}

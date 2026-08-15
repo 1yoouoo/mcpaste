@@ -13,10 +13,15 @@ import (
 )
 
 type fakeIdentityAPI struct {
-	createCalls int
+	createCalls        int
+	pairingStatusCalls int
+	pairingDenyCalls   int
 }
 
 func (f *fakeIdentityAPI) Authenticate(_ context.Context, token string) (identity.Principal, error) {
+	if token == "full-runtime-marker" {
+		return identity.Principal{WorkspaceID: "00000000-0000-4000-8000-000000000001", DeviceID: "00000000-0000-4000-8000-000000000002", Scope: "full"}, nil
+	}
 	if token == "connector-runtime-marker" {
 		return identity.Principal{WorkspaceID: "00000000-0000-4000-8000-000000000001", DeviceID: "00000000-0000-4000-8000-000000000002", Scope: "connector"}, nil
 	}
@@ -42,6 +47,17 @@ func (f *fakeIdentityAPI) ApprovePairing(context.Context, identity.Principal, st
 }
 func (f *fakeIdentityAPI) ClaimPairing(context.Context, string, string, string) (identity.Result, error) {
 	return identity.Result{}, identity.ErrNotFound
+}
+func (f *fakeIdentityAPI) PairingStatus(context.Context, string, string, string) (identity.PairingStatusResponse, error) {
+	f.pairingStatusCalls++
+	return identity.PairingStatusResponse{
+		PairingID: "00000000-0000-4000-8000-000000000301",
+		Status:    "pending",
+	}, nil
+}
+func (f *fakeIdentityAPI) DenyPairing(context.Context, identity.Principal, string, string) (identity.Result, error) {
+	f.pairingDenyCalls++
+	return identity.Result{Status: http.StatusOK, Body: []byte("{\"pairing_id\":\"00000000-0000-4000-8000-000000000301\",\"status\":\"denied\",\"expires_at\":\"2026-08-14T12:05:00Z\"}\n")}, nil
 }
 func (f *fakeIdentityAPI) ListDevices(context.Context, identity.Principal) ([]identity.DeviceSummary, error) {
 	return nil, identity.ErrForbidden
@@ -177,6 +193,78 @@ func TestConnectorCannotRevokeDevice(t *testing.T) {
 	}
 }
 
+func TestPairingStatusIsPublicAndUsesStrictJSON(t *testing.T) {
+	pairingID := "00000000-0000-4000-8000-000000000301"
+	tests := []struct {
+		name      string
+		body      string
+		wantCalls int
+		wantCode  int
+	}{
+		{name: "exact body", body: `{"claim_secret":"request-only-marker"}`, wantCalls: 1, wantCode: http.StatusOK},
+		{name: "unknown field", body: `{"claim_secret":"request-only-marker","extra":true}`, wantCode: http.StatusBadRequest},
+		{name: "duplicate field", body: `{"claim_secret":"request-only-marker","claim_secret":"second-marker"}`, wantCode: http.StatusBadRequest},
+		{name: "null object", body: `null`, wantCode: http.StatusBadRequest},
+	}
+	for _, item := range tests {
+		t.Run(item.name, func(t *testing.T) {
+			api := &fakeIdentityAPI{}
+			request := httptest.NewRequest(http.MethodPost, "/v1/pairing-requests/"+pairingID+"/status", strings.NewReader(item.body))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+
+			NewApplicationHandler(nil, api, nil).ServeHTTP(response, request)
+
+			if response.Code != item.wantCode || api.pairingStatusCalls != item.wantCalls {
+				t.Fatalf("status/calls = %d/%d", response.Code, api.pairingStatusCalls)
+			}
+			if item.wantCode == http.StatusOK && (strings.Contains(response.Body.String(), "request-only-marker") || !strings.Contains(response.Body.String(), `"status":"pending"`)) {
+				t.Fatal("status response echoed request data or omitted status")
+			}
+		})
+	}
+}
+
+func TestPairingDenyRequiresFullBearerIdempotencyAndExactEmptyObject(t *testing.T) {
+	pairingID := "00000000-0000-4000-8000-000000000301"
+	idempotencyKey := "00000000-0000-4000-8000-000000000302"
+	tests := []struct {
+		name      string
+		bearer    string
+		key       string
+		body      string
+		wantCalls int
+		wantCode  int
+	}{
+		{name: "full exact body", bearer: "full-runtime-marker", key: idempotencyKey, body: `{}`, wantCalls: 1, wantCode: http.StatusOK},
+		{name: "connector forbidden", bearer: "connector-runtime-marker", key: idempotencyKey, body: `{}`, wantCode: http.StatusForbidden},
+		{name: "missing bearer", key: idempotencyKey, body: `{}`, wantCode: http.StatusUnauthorized},
+		{name: "missing idempotency", bearer: "full-runtime-marker", body: `{}`, wantCode: http.StatusBadRequest},
+		{name: "unknown field", bearer: "full-runtime-marker", key: idempotencyKey, body: `{"extra":true}`, wantCode: http.StatusBadRequest},
+		{name: "null object", bearer: "full-runtime-marker", key: idempotencyKey, body: `null`, wantCode: http.StatusBadRequest},
+	}
+	for _, item := range tests {
+		t.Run(item.name, func(t *testing.T) {
+			api := &fakeIdentityAPI{}
+			request := httptest.NewRequest(http.MethodPost, "/v1/pairing-requests/"+pairingID+"/deny", strings.NewReader(item.body))
+			request.Header.Set("Content-Type", "application/json")
+			if item.bearer != "" {
+				request.Header.Set("Authorization", "Bearer "+item.bearer)
+			}
+			if item.key != "" {
+				request.Header.Set("Idempotency-Key", item.key)
+			}
+			response := httptest.NewRecorder()
+
+			NewApplicationHandler(nil, api, nil).ServeHTTP(response, request)
+
+			if response.Code != item.wantCode || api.pairingDenyCalls != item.wantCalls {
+				t.Fatalf("status/calls = %d/%d", response.Code, api.pairingDenyCalls)
+			}
+		})
+	}
+}
+
 func TestDuplicateSecurityHeadersAreRejected(t *testing.T) {
 	t.Run("authorization", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, "/v1/devices", nil)
@@ -220,16 +308,25 @@ func TestV1MethodGuardRecognizesEveryRouteShape(t *testing.T) {
 		{name: "pairing details", method: http.MethodGet, path: "/v1/pairing-requests/00000000-0000-4000-8000-000000000301", wantStatus: http.StatusNoContent, wantDelegated: true},
 		{name: "pairing approval", method: http.MethodPost, path: "/v1/pairing-requests/00000000-0000-4000-8000-000000000301/approve", wantStatus: http.StatusNoContent, wantDelegated: true},
 		{name: "pairing claim", method: http.MethodPost, path: "/v1/pairing-requests/00000000-0000-4000-8000-000000000301/claim", wantStatus: http.StatusNoContent, wantDelegated: true},
+		{name: "pairing status", method: http.MethodPost, path: "/v1/pairing-requests/00000000-0000-4000-8000-000000000301/status", wantStatus: http.StatusNoContent, wantDelegated: true},
+		{name: "pairing denial", method: http.MethodPost, path: "/v1/pairing-requests/00000000-0000-4000-8000-000000000301/deny", wantStatus: http.StatusNoContent, wantDelegated: true},
 		{name: "device list", method: http.MethodGet, path: "/v1/devices", wantStatus: http.StatusNoContent, wantDelegated: true},
 		{name: "device rename", method: http.MethodPatch, path: "/v1/devices/00000000-0000-4000-8000-000000000201", wantStatus: http.StatusNoContent, wantDelegated: true},
 		{name: "device revoke", method: http.MethodDelete, path: "/v1/devices/00000000-0000-4000-8000-000000000201", wantStatus: http.StatusNoContent, wantDelegated: true},
 		{name: "recovery", method: http.MethodPost, path: "/v1/recoveries", wantStatus: http.StatusNoContent, wantDelegated: true},
+		{name: "paste attachments replace", method: http.MethodPut, path: "/v1/pastes/00000000-0000-4000-8000-000000000201/attachments", wantStatus: http.StatusNoContent, wantDelegated: true},
+		{name: "paste attachment download", method: http.MethodGet, path: "/v1/pastes/00000000-0000-4000-8000-000000000201/attachments/0", wantStatus: http.StatusNoContent, wantDelegated: true},
 		{name: "non v1 health", method: http.MethodGet, path: "/readyz", wantStatus: http.StatusNoContent, wantDelegated: true},
 		{name: "workspace wrong method", method: http.MethodGet, path: "/v1/workspaces", wantStatus: http.StatusMethodNotAllowed, wantAllow: http.MethodPost},
 		{name: "pairing details head", method: http.MethodHead, path: "/v1/pairing-requests/00000000-0000-4000-8000-000000000301", wantStatus: http.StatusMethodNotAllowed, wantAllow: http.MethodGet},
+		{name: "pairing status wrong method", method: http.MethodGet, path: "/v1/pairing-requests/00000000-0000-4000-8000-000000000301/status", wantStatus: http.StatusMethodNotAllowed, wantAllow: http.MethodPost},
+		{name: "pairing denial wrong method", method: http.MethodGet, path: "/v1/pairing-requests/00000000-0000-4000-8000-000000000301/deny", wantStatus: http.StatusMethodNotAllowed, wantAllow: http.MethodPost},
 		{name: "device list head", method: http.MethodHead, path: "/v1/devices", wantStatus: http.StatusMethodNotAllowed, wantAllow: http.MethodGet},
 		{name: "device dynamic wrong method", method: http.MethodGet, path: "/v1/devices/00000000-0000-4000-8000-000000000201", wantStatus: http.StatusMethodNotAllowed, wantAllow: "PATCH, DELETE"},
+		{name: "paste attachments wrong method", method: http.MethodGet, path: "/v1/pastes/00000000-0000-4000-8000-000000000201/attachments", wantStatus: http.StatusMethodNotAllowed, wantAllow: http.MethodPut},
+		{name: "paste attachment download wrong method", method: http.MethodPut, path: "/v1/pastes/00000000-0000-4000-8000-000000000201/attachments/0", wantStatus: http.StatusMethodNotAllowed, wantAllow: http.MethodGet},
 		{name: "static lookup is not dynamic details", method: http.MethodGet, path: "/v1/pairing-requests/lookup", wantStatus: http.StatusMethodNotAllowed, wantAllow: http.MethodPost},
+		{name: "paste attachment extra segment", method: http.MethodGet, path: "/v1/pastes/00000000-0000-4000-8000-000000000201/attachments/0/extra", wantStatus: http.StatusNotFound},
 		{name: "unknown path", method: http.MethodGet, path: "/v1/not-a-route", wantStatus: http.StatusNotFound},
 		{name: "extra dynamic segment", method: http.MethodGet, path: "/v1/devices/id/extra", wantStatus: http.StatusNotFound},
 		{name: "v1 root", method: http.MethodGet, path: "/v1/", wantStatus: http.StatusNotFound},

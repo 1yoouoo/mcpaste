@@ -1,5 +1,6 @@
 import Foundation
 
+@MainActor
 public final class WorkspaceSession {
     public private(set) var syncState: SyncState = .idle
     public private(set) var history: [CachedPaste] = []
@@ -10,60 +11,156 @@ public final class WorkspaceSession {
     private let cache: SQLiteCache
     private let coordinator: SyncCoordinator
     private let queue: OfflineMutationQueue
-    private let api: MCPasteAPI?
-    public init(cache: SQLiteCache, coordinator: SyncCoordinator, api: MCPasteAPI? = nil) { self.cache = cache; self.coordinator = coordinator; self.queue = OfflineMutationQueue(cache: cache); self.api = api; self.history = (try? cache.allPastes()) ?? [] }
+    private let api: WorkspaceAPI?
+    private let deviceAPI: DeviceAPI?
+    private let attachmentStore: PendingAttachmentStore?
+    private let attachmentCache: AttachmentCache?
+    private let replayGate = ReplayGate()
+    private var pasteIDRemaps: [String: String] = [:]
+    public init(
+        cache: SQLiteCache,
+        coordinator: SyncCoordinator,
+        api: WorkspaceAPI? = nil,
+        deviceAPI: DeviceAPI? = nil,
+        attachmentStore: PendingAttachmentStore? = nil,
+        attachmentCache: AttachmentCache? = nil
+    ) {
+        self.cache = cache
+        self.coordinator = coordinator
+        self.queue = OfflineMutationQueue(cache: cache)
+        self.api = api
+        self.deviceAPI = deviceAPI
+        self.attachmentStore = attachmentStore
+        self.attachmentCache = attachmentCache
+        do {
+            self.history = try cache.allPastes()
+        } catch {
+            self.history = []
+            self.syncState = .failed
+        }
+        cleanupAttachmentOrphans()
+    }
 
     public func refresh() async throws {
-        try await coordinator.sync()
-        syncState = coordinator.state
-        history = (try? cache.allPastes()) ?? []
-        pendingCount = (try? queue.pending().count) ?? 0
+        do {
+            try await coordinator.sync()
+            syncState = coordinator.state
+            history = try cache.allPastes()
+            pendingCount = try queue.pending().count
+        } catch {
+            syncState = .failed
+            throw error
+        }
     }
 
     public func refreshDevices() async throws {
-        guard let api else { return }
-        devices = try await api.listDevices()
+        guard let deviceAPI else { throw APIError.invalidResponse }
+        devices = try await deviceAPI.listDevices()
     }
 
     public func renameDevice(id: String, displayName: String) async throws {
-        guard let api else { return }
-        _ = try await api.renameDevice(id: id, displayName: displayName)
+        guard let deviceAPI else { throw APIError.invalidResponse }
+        _ = try await deviceAPI.renameDevice(id: id, displayName: displayName, idempotencyKey: UUID().uuidString.lowercased())
         try await refreshDevices()
     }
 
     public func revokeDevice(id: String) async throws {
-        guard let api else { return }
-        try await api.revokeDevice(id: id)
+        guard let deviceAPI else { throw APIError.invalidResponse }
+        try await deviceAPI.revokeDevice(id: id, idempotencyKey: UUID().uuidString.lowercased())
         try await refreshDevices()
     }
 
-    public func enqueue(_ mutation: MutationKind, pasteID: String, body: Data) throws {
-        _ = try queue.enqueue(kind: mutation, pasteID: pasteID, body: body)
+    public func enqueue(_ mutation: MutationKind, pasteID: String, body: Data, idempotencyKey: String? = nil) throws {
+        _ = try queue.enqueue(kind: mutation, pasteID: pasteID, body: body, idempotencyKey: idempotencyKey)
+        pendingCount = (try? queue.pending().count) ?? pendingCount
+    }
+
+    public func enqueueAttachments(_ images: [NormalizedImage], pasteID: String, idempotencyKey: String? = nil) throws {
+        guard let attachmentStore else { throw APIError.invalidResponse }
+        let manifest = try attachmentStore.persist(images)
+        do {
+            _ = try queue.enqueueAttachments(pasteID: pasteID, manifest: manifest, idempotencyKey: idempotencyKey)
+        } catch {
+            try? attachmentStore.remove(manifest)
+            throw error
+        }
         pendingCount = (try? queue.pending().count) ?? pendingCount
     }
 
     public func replayPending() async {
-        guard let api else { return }
-        guard let pending = try? queue.pending() else { return }
-        for item in pending {
+        guard await replayGate.begin() else { return }
+        await replayPendingOnce()
+        await replayGate.end()
+    }
+
+    private func replayPendingOnce() async {
+        guard let api else {
+            syncState = .failed
+            return
+        }
+        guard let pending = try? queue.pending() else {
+            syncState = .failed
+            return
+        }
+        var remappedPasteIDs: [String: String] = [:]
+        replayLoop: for item in pending {
+            let pasteID = remappedPasteIDs[item.pasteID] ?? item.pasteID
             do {
                 switch item.kind {
                 case .create:
                     let request = try JSONDecoder().decode(CreatePasteRequest.self, from: item.body)
-                    _ = try await api.createPaste(text: request.text, idempotencyKey: item.idempotencyKey)
+                    let record = try await api.createPaste(text: request.text, idempotencyKey: item.idempotencyKey)
+                    if item.pasteID.hasPrefix("local:") {
+                        try cache.remapPasteID(from: item.pasteID, to: record.id)
+                        remappedPasteIDs[item.pasteID] = record.id
+                        pasteIDRemaps[item.pasteID] = record.id
+                    }
                 case .update:
                     let request = try JSONDecoder().decode(CreatePasteRequest.self, from: item.body)
-                    _ = try await api.updatePaste(id: item.pasteID, text: request.text, idempotencyKey: item.idempotencyKey)
+                    _ = try await api.updatePaste(id: pasteID, text: request.text, idempotencyKey: item.idempotencyKey)
                 case .delete:
-                    try await api.deletePaste(id: item.pasteID, idempotencyKey: item.idempotencyKey)
+                    try await api.deletePaste(id: pasteID, idempotencyKey: item.idempotencyKey)
+                case .replaceAttachments:
+                    guard let attachmentStore else {
+                        _ = try? queue.retry(item.id)
+                        syncState = .failed
+                        break replayLoop
+                    }
+                    guard let manifest = try? JSONDecoder().decode(PendingAttachmentManifest.self, from: item.body) else { throw APIError.invalidResponse }
+                    let images = try attachmentStore.load(manifest)
+                    let record = try await api.replaceAttachments(
+                        pasteID: pasteID,
+                        images: images,
+                        idempotencyKey: item.idempotencyKey
+                    )
+                    try await cacheAttachments(for: record)
+                    try queue.remove(item.id)
+                    do {
+                        try attachmentStore.remove(manifest)
+                    } catch {
+                        syncState = .failed
+                        cleanupAttachmentOrphans()
+                        break replayLoop
+                    }
                 }
-                try? queue.remove(item.id)
+                if item.kind != .replaceAttachments {
+                    try queue.remove(item.id)
+                }
             } catch {
-                _ = try? queue.retry(item.id)
+                syncState = .failed
+                do {
+                    _ = try queue.retry(item.id)
+                } catch {
+                    syncState = .failed
+                }
                 break
             }
         }
-        pendingCount = (try? queue.pending().count) ?? pendingCount
+        do {
+            pendingCount = try queue.pending().count
+        } catch {
+            syncState = .failed
+        }
     }
 
     public func startPolling() { coordinator.startPolling() }
@@ -72,4 +169,61 @@ public final class WorkspaceSession {
     public func currentCursor() -> Int64 { (try? cache.cursor()) ?? 0 }
 
     public func markMCPAccess(at date: Date = Date()) { lastMCPAccessAt = date }
+
+    public func resolvedPasteID(_ pasteID: String) -> String {
+        pasteIDRemaps[pasteID] ?? pasteID
+    }
+
+    public func cacheAttachments(for record: PasteRecord) async throws {
+        guard let attachmentCache else { return }
+        guard let api else { throw APIError.invalidResponse }
+        guard let revisionID = record.attachmentRevisionID else {
+            try attachmentCache.removeAll(forPasteID: record.id)
+            return
+        }
+
+        var storedKeys: [AttachmentCache.Key] = []
+        do {
+            for attachment in record.attachments {
+                let data = try await api.downloadAttachment(pasteID: record.id, assetIndex: attachment.assetIndex)
+                let key = try AttachmentCache.Key(
+                    pasteID: record.id,
+                    revisionID: revisionID,
+                    assetIndex: attachment.assetIndex
+                )
+                try attachmentCache.store(data, for: key)
+                storedKeys.append(key)
+            }
+            try attachmentCache.removeOtherRevisions(forPasteID: record.id, keeping: revisionID)
+        } catch {
+            for key in storedKeys { try? attachmentCache.remove(key) }
+            throw error
+        }
+    }
+
+    private func cleanupAttachmentOrphans() {
+        guard let attachmentStore else { return }
+        do {
+            let referencedPaths = try queue.pending().reduce(into: Set<String>()) { paths, item in
+                guard item.kind == .replaceAttachments else { return }
+                let manifest = try JSONDecoder().decode(PendingAttachmentManifest.self, from: item.body)
+                paths.formUnion(manifest.items.map(\.path))
+            }
+            try attachmentStore.removeOrphans(referencedPaths: referencedPaths)
+        } catch {
+            syncState = .failed
+        }
+    }
+}
+
+private actor ReplayGate {
+    private var active = false
+
+    func begin() -> Bool {
+        guard !active else { return false }
+        active = true
+        return true
+    }
+
+    func end() { active = false }
 }

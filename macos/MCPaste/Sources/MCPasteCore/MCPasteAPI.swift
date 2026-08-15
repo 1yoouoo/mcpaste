@@ -12,7 +12,21 @@ public protocol SnapshotAPI: AnyObject {
     func snapshot() async throws -> SnapshotPage
 }
 
-public final class MCPasteAPI: SyncAPI, SnapshotAPI, EventsAPI {
+public protocol WorkspaceAPI: SyncAPI, SnapshotAPI, EventsAPI, AnyObject {
+    func createPaste(text: String, idempotencyKey: String) async throws -> PasteRecord
+    func updatePaste(id: String, text: String, idempotencyKey: String) async throws -> PasteRecord
+    func deletePaste(id: String, idempotencyKey: String) async throws
+    func replaceAttachments(pasteID: String, images: [NormalizedImage], idempotencyKey: String) async throws -> PasteRecord
+    func downloadAttachment(pasteID: String, assetIndex: Int) async throws -> Data
+}
+
+public protocol DeviceAPI: AnyObject {
+    func listDevices() async throws -> [DeviceRecord]
+    func renameDevice(id: String, displayName: String, idempotencyKey: String) async throws -> DeviceRecord
+    func revokeDevice(id: String, idempotencyKey: String) async throws
+}
+
+public final class MCPasteAPI: WorkspaceAPI, DeviceAPI {
     public let baseURL: URL
     public let token: String
     private let session: URLSession
@@ -73,8 +87,11 @@ public final class MCPasteAPI: SyncAPI, SnapshotAPI, EventsAPI {
         _ = try await sendVoid(path: "/v1/pastes/\(id)", method: "DELETE", idempotencyKey: idempotencyKey)
     }
 
-    public func uploadImages(_ images: [NormalizedImage], idempotencyKey: String = UUID().uuidString.lowercased()) async throws -> PasteRecord {
-        guard !images.isEmpty else { throw APIError.invalidResponse }
+    public func replaceAttachments(
+        pasteID: String,
+        images: [NormalizedImage],
+        idempotencyKey: String = UUID().uuidString.lowercased()
+    ) async throws -> PasteRecord {
         let boundary = "MCPaste-\(UUID().uuidString)"
         var body = Data()
         for (index, image) in images.enumerated() {
@@ -86,15 +103,70 @@ public final class MCPasteAPI: SyncAPI, SnapshotAPI, EventsAPI {
             body.append(Data("\r\n".utf8))
         }
         body.append(Data("--\(boundary)--\r\n".utf8))
-        guard let url = URL(string: "/v1/image-pastes", relativeTo: baseURL) else { throw APIError.invalidResponse }
+        guard let url = URL(string: "/v1/pastes/\(pasteID)/attachments", relativeTo: baseURL) else {
+            throw APIError.invalidResponse
+        }
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = "PUT"
         request.httpBody = body
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if !token.isEmpty { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
         let (data, _) = try await perform(request)
         do { return try decoder.decode(PasteRecord.self, from: data) } catch { throw APIError.invalidResponse }
+    }
+
+    public func downloadAttachment(pasteID: String, assetIndex: Int) async throws -> Data {
+        let request = try makeRequest(
+            path: "/v1/pastes/\(pasteID)/attachments/\(assetIndex)",
+            body: Optional<String>.none
+        )
+        let (data, _) = try await perform(request)
+        return data
+    }
+
+    public func lookupPairing(shortCode: String) async throws -> PairingDetails {
+        try await send(
+            path: "/v1/pairing-requests/lookup",
+            method: "POST",
+            body: ["short_code": shortCode] as [String: String]
+        )
+    }
+
+    public func approvePairing(
+        id: String,
+        idempotencyKey: String = UUID().uuidString.lowercased()
+    ) async throws -> ApprovalRecord {
+        try await send(
+            path: "/v1/pairing-requests/\(id)/approve",
+            method: "POST",
+            body: EmptyRequest(),
+            idempotencyKey: idempotencyKey
+        )
+    }
+
+    public func pairingStatus(id: String, claimSecret: String) async throws -> PairingStatusRecord {
+        var request = try makeRequest(
+            path: "/v1/pairing-requests/\(id)/status",
+            method: "POST",
+            body: PairingStatusRequest(claimSecret: claimSecret)
+        )
+        request.setValue(nil, forHTTPHeaderField: "Authorization")
+        let (data, _) = try await perform(request)
+        do { return try decoder.decode(PairingStatusRecord.self, from: data) } catch { throw APIError.invalidResponse }
+    }
+
+    public func denyPairing(
+        id: String,
+        idempotencyKey: String = UUID().uuidString.lowercased()
+    ) async throws -> PairingStatusRecord {
+        try await send(
+            path: "/v1/pairing-requests/\(id)/deny",
+            method: "POST",
+            body: EmptyRequest(),
+            idempotencyKey: idempotencyKey
+        )
     }
 
     public func listPastes() async throws -> [PasteRecord] { let response: PasteListResponse = try await send(path: "/v1/pastes"); return response.pastes }
@@ -190,6 +262,55 @@ private final class EventStreamCancellation: @unchecked Sendable {
 
 private struct PasteListResponse: Decodable { let pastes: [PasteRecord] }
 private struct DeviceListResponse: Decodable { let devices: [DeviceRecord] }
+private struct EmptyRequest: Encodable {}
+private struct PairingStatusRequest: Encodable {
+    let claimSecret: String
+    enum CodingKeys: String, CodingKey { case claimSecret = "claim_secret" }
+}
+
+public struct PairingDetails: Decodable, Equatable {
+    public let pairingID: String
+    public let proposedName: String
+    public let platform: String
+    public let requestedScope: String
+    public let status: String
+    public let expiresAt: Date
+    public let claimExpiresAt: Date?
+    enum CodingKeys: String, CodingKey {
+        case pairingID = "pairing_id"
+        case proposedName = "proposed_name"
+        case platform
+        case requestedScope = "requested_scope"
+        case status
+        case expiresAt = "expires_at"
+        case claimExpiresAt = "claim_expires_at"
+    }
+}
+
+public struct ApprovalRecord: Decodable, Equatable {
+    public let pairingID: String
+    public let status: String
+    public let claimExpiresAt: Date
+    enum CodingKeys: String, CodingKey {
+        case pairingID = "pairing_id"
+        case status
+        case claimExpiresAt = "claim_expires_at"
+    }
+}
+
+public struct PairingStatusRecord: Decodable, Equatable {
+    public let pairingID: String
+    public let status: String
+    public let expiresAt: Date
+    public let claimExpiresAt: Date?
+    enum CodingKeys: String, CodingKey {
+        case pairingID = "pairing_id"
+        case status
+        case expiresAt = "expires_at"
+        case claimExpiresAt = "claim_expires_at"
+    }
+}
+
 public struct PairingRecord: Decodable, Equatable {
     public let pairingID: String
     public let shortCode: String

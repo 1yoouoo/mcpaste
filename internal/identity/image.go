@@ -73,7 +73,7 @@ func (s *Service) mutateImage(ctx context.Context, principal Principal, pasteID,
 				return nil, "", ErrInvalid
 			}
 			stored = append(stored, asset)
-			assets = append(assets, ImageAsset{AssetIndex: index, MIMEType: inputAsset.MIMEType, Width: inputAsset.Width, Height: inputAsset.Height, ByteSize: int64(len(inputAsset.Bytes)), StorageKey: asset.StorageKey, Envelope: asset.Envelope})
+			assets = append(assets, ImageAsset{AssetIndex: index, MIMEType: inputAsset.MIMEType, Width: inputAsset.Width, Height: inputAsset.Height, ByteSize: int64(len(inputAsset.Bytes)), ExpiresAt: expiresAt, StorageKey: asset.StorageKey, Envelope: asset.Envelope})
 		}
 		revision, err := tx.AppendImageRevision(ctx, principal.WorkspaceID, pasteID, revisionID, eventType, assets, now, expiresAt)
 		if err != nil {
@@ -151,7 +151,7 @@ func imageCanonicalInput(input CreateImagePasteInput) any {
 func imageResponse(revision TextRevision) PasteResponse {
 	assets := make([]ImageAssetResponse, 0, len(revision.Assets))
 	for _, asset := range revision.Assets {
-		assets = append(assets, ImageAssetResponse{AssetIndex: asset.AssetIndex, MIMEType: asset.MIMEType, Width: asset.Width, Height: asset.Height, ByteSize: asset.ByteSize})
+		assets = append(assets, ImageAssetResponse{AssetIndex: asset.AssetIndex, MIMEType: asset.MIMEType, Width: asset.Width, Height: asset.Height, ByteSize: asset.ByteSize, ExpiresAt: wireTime(asset.ExpiresAt)})
 	}
 	return PasteResponse{PasteID: revision.PasteID, RevisionID: revision.RevisionID, Kind: "image_bundle", ServerSequence: revision.ServerSequence, CreatedAt: wireTime(revision.CreatedAt), ExpiresAt: wireTime(revision.ExpiresAt), Assets: assets}
 }

@@ -3,7 +3,9 @@ package identity_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,38 @@ import (
 	"github.com/1yoouoo/mcpaste/internal/secure"
 	"github.com/1yoouoo/mcpaste/internal/testdb"
 )
+
+type componentSyncStore struct {
+	identity.Store
+	tx    *componentSyncTx
+	calls int
+}
+
+func (store *componentSyncStore) WithinTx(ctx context.Context, run func(identity.TxStore) error) error {
+	store.calls++
+	return run(store.tx)
+}
+
+type componentSyncTx struct {
+	identity.TxStore
+	result       identity.SyncResult
+	assets       map[string][]identity.ImageAsset
+	after        int64
+	limit        int
+	assetLookups []string
+}
+
+func (tx *componentSyncTx) Sync(_ context.Context, _ string, after int64, limit int, _ time.Time) (identity.SyncResult, error) {
+	tx.after = after
+	tx.limit = limit
+	return tx.result, nil
+}
+
+func (tx *componentSyncTx) ListImageAssets(_ context.Context, _, pasteID, revisionID string) ([]identity.ImageAsset, error) {
+	tx.assetLookups = append(tx.assetLookups, pasteID+":"+revisionID)
+	assets := tx.assets[revisionID]
+	return append([]identity.ImageAsset(nil), assets...), nil
+}
 
 type textCounter struct{ next byte }
 
@@ -183,6 +217,93 @@ func TestSyncReturnsOrderedEventsAndTombstones(t *testing.T) {
 	}
 	if second.Cursor != 2 || second.HasMore || len(second.Events) != 1 || second.Events[0].EventType != "paste.deleted" || !second.Events[0].Deleted || second.Events[0].Text != nil {
 		t.Fatalf("second sync page = %#v", second)
+	}
+}
+
+func TestSyncReturnsAttachmentComponentEventsWithoutCollapsingCursor(t *testing.T) {
+	now := time.Date(2026, 8, 14, 7, 0, 0, 0, time.UTC)
+	workspaceID := "00000000-0000-4000-8000-000000000551"
+	pasteID := "00000000-0000-4000-8000-000000000552"
+	textRevisionID := "00000000-0000-4000-8000-000000000553"
+	attachmentRevisionID := "00000000-0000-4000-8000-000000000554"
+	clearRevisionID := "00000000-0000-4000-8000-000000000555"
+	legacyRevisionID := "00000000-0000-4000-8000-000000000556"
+	tombstoneRevisionID := "00000000-0000-4000-8000-000000000557"
+	exact := "  sync line one\r\nline two\ntrailing  "
+	random := &textCounter{next: 1}
+	keyring, err := secure.NewKeyring("sync-components", map[string][]byte{
+		"sync-components": bytes.Repeat([]byte{0x31}, 32),
+	}, random)
+	if err != nil {
+		t.Fatalf("NewKeyring() error = %v", err)
+	}
+	envelope, err := keyring.Encrypt(
+		"paste-text", workspaceID+":"+pasteID+":"+textRevisionID, []byte(exact),
+	)
+	if err != nil {
+		t.Fatalf("Encrypt() error = %v", err)
+	}
+	assetExpiry := now.Add(24 * time.Hour)
+	tx := &componentSyncTx{
+		result: identity.SyncResult{
+			Cursor: 20, HasMore: false,
+			Events: []identity.SyncEvent{
+				{WorkspaceID: workspaceID, Sequence: 11, EventType: "paste.revised", PasteID: pasteID, RevisionID: textRevisionID, RevisionKind: identity.RevisionContent, ServerSequence: 11, CreatedAt: now, ExpiresAt: now.AddDate(1, 0, 0), Envelope: envelope},
+				{WorkspaceID: workspaceID, Sequence: 12, EventType: "paste.revised", PasteID: pasteID, RevisionID: attachmentRevisionID, RevisionKind: identity.RevisionAttachmentBundle, ServerSequence: 12, CreatedAt: now.Add(time.Second), ExpiresAt: assetExpiry, Envelope: secure.Envelope{KeyID: "must-not-decrypt"}},
+				{WorkspaceID: workspaceID, Sequence: 13, EventType: "paste.revised", PasteID: pasteID, RevisionID: clearRevisionID, RevisionKind: identity.RevisionAttachmentBundle, ServerSequence: 13, CreatedAt: now.Add(2 * time.Second), ExpiresAt: assetExpiry, Envelope: secure.Envelope{KeyID: "must-not-decrypt"}},
+				{WorkspaceID: workspaceID, Sequence: 14, EventType: "paste.deleted", PasteID: pasteID, RevisionID: tombstoneRevisionID, RevisionKind: identity.RevisionTombstone, ServerSequence: 14, CreatedAt: now.Add(3 * time.Second), ExpiresAt: now.AddDate(1, 0, 0), Envelope: secure.Envelope{KeyID: "must-not-decrypt"}},
+				{WorkspaceID: workspaceID, Sequence: 15, EventType: "paste.created", PasteID: pasteID, RevisionID: legacyRevisionID, RevisionKind: identity.RevisionImageBundle, ServerSequence: 15, CreatedAt: now.Add(4 * time.Second), ExpiresAt: assetExpiry, Envelope: secure.Envelope{KeyID: "must-not-decrypt"}},
+			},
+		},
+		assets: map[string][]identity.ImageAsset{
+			attachmentRevisionID: {
+				{AssetIndex: 0, MIMEType: "image/png", Width: 1, Height: 2, ByteSize: 30, ExpiresAt: assetExpiry, StorageKey: "secret-storage-key", Bytes: []byte("secret-image-bytes")},
+				{AssetIndex: 1, MIMEType: "image/bmp", Width: 3, Height: 4, ByteSize: 31, ExpiresAt: assetExpiry},
+			},
+			clearRevisionID:  {},
+			legacyRevisionID: {{AssetIndex: 0, MIMEType: "image/tiff", Width: 5, Height: 6, ByteSize: 32, ExpiresAt: assetExpiry}},
+		},
+	}
+	store := &componentSyncStore{tx: tx}
+	service := identity.NewService(store, keyring, random, fixedClock{value: now})
+	response, err := service.Sync(context.Background(), identity.Principal{WorkspaceID: workspaceID, Scope: "full"}, 10, 5)
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if response.Cursor != 20 || response.HasMore || len(response.Events) != 5 || tx.after != 10 || tx.limit != 5 {
+		t.Fatalf("Sync() cursor/events/input = %#v after:%d limit:%d", response, tx.after, tx.limit)
+	}
+	if response.Events[0].Kind != identity.RevisionContent || response.Events[0].Text == nil || *response.Events[0].Text != exact || response.Events[0].Assets != nil {
+		t.Fatalf("text event = %#v", response.Events[0])
+	}
+	if response.Events[1].Kind != identity.RevisionAttachmentBundle || response.Events[1].Text != nil || response.Events[1].Assets == nil || len(*response.Events[1].Assets) != 2 || (*response.Events[1].Assets)[1].AssetIndex != 1 {
+		t.Fatalf("attachment event = %#v", response.Events[1])
+	}
+	if response.Events[2].Assets == nil || len(*response.Events[2].Assets) != 0 {
+		t.Fatalf("clear event = %#v", response.Events[2])
+	}
+	if !response.Events[3].Deleted || response.Events[3].Text != nil || response.Events[3].Assets != nil {
+		t.Fatalf("tombstone event = %#v", response.Events[3])
+	}
+	if response.Events[4].Kind != identity.RevisionImageBundle || response.Events[4].Assets == nil || len(*response.Events[4].Assets) != 1 {
+		t.Fatalf("legacy event = %#v", response.Events[4])
+	}
+	if len(tx.assetLookups) != 3 || store.calls != 1 {
+		t.Fatalf("asset lookups/transactions = %#v/%d", tx.assetLookups, store.calls)
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"secret-storage-key",
+		"secret-image-bytes",
+		base64.StdEncoding.EncodeToString([]byte("secret-image-bytes")),
+		"must-not-decrypt", "ciphertext", "nonce",
+	} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("sync JSON exposed %q: %s", forbidden, encoded)
+		}
 	}
 }
 

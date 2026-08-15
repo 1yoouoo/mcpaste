@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"time"
@@ -55,12 +56,31 @@ where short_code = $2 and (workspace_id is null or workspace_id = $1::uuid)`, wo
 	return pairing, nil
 }
 
+func (s *txStore) GetPairingForStatus(ctx context.Context, pairingID string, claimHash []byte, _ time.Time) (identity.Pairing, error) {
+	pairing, err := scanPairing(s.tx.QueryRow(ctx, pairingSelect+" where id = $1::uuid", pairingID))
+	if errors.Is(err, identity.ErrNotFound) {
+		var dummyClaimHash [sha256.Size]byte
+		_ = subtle.ConstantTimeCompare(dummyClaimHash[:], claimHash)
+		return identity.Pairing{}, identity.ErrInvalidClaim
+	}
+	if err != nil {
+		return identity.Pairing{}, err
+	}
+	if subtle.ConstantTimeCompare(pairing.ClaimHash, claimHash) != 1 {
+		return identity.Pairing{}, identity.ErrInvalidClaim
+	}
+	return pairing, nil
+}
+
 func (s *txStore) LockPairingForApproval(ctx context.Context, workspaceID, pairingID string, now time.Time) (identity.Pairing, error) {
 	pairing, err := scanPairing(s.tx.QueryRow(ctx, pairingSelect+`
 where id = $2::uuid and (workspace_id is null or workspace_id = $1::uuid)
 for update`, workspaceID, pairingID))
 	if err != nil {
 		return identity.Pairing{}, err
+	}
+	if !pairing.ClaimInvalidatedAt.IsZero() {
+		return identity.Pairing{}, identity.ErrPairingDenied
 	}
 	if pairing.WorkspaceID != "" {
 		return identity.Pairing{}, identity.ErrPairingApproved
@@ -83,7 +103,7 @@ update pairing_requests set
     grant_nonce = $8,
     grant_ciphertext = $9,
     metadata_purge_at = $10
-where id = $2::uuid and workspace_id is null and expires_at > $5`,
+where id = $2::uuid and workspace_id is null and claim_invalidated_at is null and expires_at > $5`,
 		workspaceID, pairingID, approverDeviceID, joiningDeviceID,
 		approvedAt, claimExpiresAt, grant.KeyID, grant.Nonce, grant.Ciphertext, purgeAt,
 	)
@@ -104,19 +124,57 @@ func (s *txStore) LockPairingForClaim(ctx context.Context, pairingID string, cla
 	if subtle.ConstantTimeCompare(pairing.ClaimHash, claimHash) != 1 {
 		return identity.Pairing{}, identity.ErrInvalidClaim
 	}
+	if !pairing.ClaimInvalidatedAt.IsZero() {
+		return identity.Pairing{}, identity.ErrPairingDenied
+	}
 	if pairing.WorkspaceID == "" {
 		if !pairing.ExpiresAt.After(now) {
 			return identity.Pairing{}, identity.ErrPairingExpired
 		}
 		return identity.Pairing{}, identity.ErrPairingPending
 	}
-	if !pairing.ClaimInvalidatedAt.IsZero() {
-		return identity.Pairing{}, identity.ErrPairingExpired
-	}
 	if !pairing.ClaimExpiresAt.After(now) {
 		return identity.Pairing{}, identity.ErrPairingExpired
 	}
 	return pairing, nil
+}
+
+func (s *txStore) LockPairingForDenial(ctx context.Context, workspaceID, pairingID string, now time.Time) (identity.Pairing, error) {
+	pairing, err := scanPairing(s.tx.QueryRow(ctx, pairingSelect+`
+where id = $2::uuid and (workspace_id is null or workspace_id = $1::uuid)
+for update`, workspaceID, pairingID))
+	if err != nil {
+		return identity.Pairing{}, err
+	}
+	if !pairing.ClaimInvalidatedAt.IsZero() {
+		return identity.Pairing{}, identity.ErrPairingDenied
+	}
+	if pairing.WorkspaceID != "" {
+		return identity.Pairing{}, identity.ErrPairingApproved
+	}
+	if !pairing.ExpiresAt.After(now) {
+		return identity.Pairing{}, identity.ErrPairingExpired
+	}
+	return pairing, nil
+}
+
+func (s *txStore) InvalidatePendingPairing(ctx context.Context, pairingID string, now time.Time) error {
+	command, err := s.tx.Exec(ctx, `
+update pairing_requests set
+    claim_invalidated_at = $2,
+    metadata_purge_at = greatest(metadata_purge_at, $2::timestamptz + interval '24 hours')
+where id = $1::uuid
+  and workspace_id is null
+  and approved_at is null
+  and claim_invalidated_at is null
+  and expires_at > $2`, pairingID, now)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return identity.ErrPairingExpired
+	}
+	return nil
 }
 
 func (s *txStore) MarkPairingClaimed(ctx context.Context, pairingID string, claimedAt time.Time) error {

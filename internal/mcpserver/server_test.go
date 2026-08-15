@@ -1,9 +1,13 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +89,73 @@ func TestMCPReturnsOrderedImageContent(t *testing.T) {
 	first, ok := result.Content[0].(*mcp.ImageContent)
 	if !ok || first.MIMEType != "image/png" || string(first.Data) != string([]byte{1, 2}) {
 		t.Fatalf("first image = %#v", result.Content[0])
+	}
+	metadata, ok := result.StructuredContent.(map[string]any)
+	if !ok || metadata["kind"] != "content" || metadata["assets"] != float64(2) {
+		t.Fatalf("image metadata = %#v", result.StructuredContent)
+	}
+}
+
+func TestMCPAvailableEmptyTextOmitsTextBlock(t *testing.T) {
+	session := connectTestClient(t, &fakeLatestPasteService{latest: identity.LatestPaste{
+		Available: true, PasteID: "00000000-0000-4000-8000-000000000604", RevisionID: "00000000-0000-4000-8000-000000000605",
+	}})
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_latest_paste"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError || len(result.Content) != 0 {
+		t.Fatalf("empty text content = %#v", result.Content)
+	}
+	metadata, ok := result.StructuredContent.(map[string]any)
+	if !ok || metadata["available"] != true || metadata["kind"] != "content" || metadata["assets"] != float64(0) {
+		t.Fatalf("empty text metadata = %#v", result.StructuredContent)
+	}
+}
+
+func TestMCPReturnsTextThenOrderedAttachments(t *testing.T) {
+	exact := "  line one\r\nline two\ntrailing  "
+	createdAt := time.Date(2026, 8, 14, 8, 0, 0, 0, time.UTC)
+	expiresAt := createdAt.Add(24 * time.Hour)
+	service := &fakeLatestPasteService{latest: identity.LatestPaste{
+		Available: true, PasteID: "00000000-0000-4000-8000-000000000611", RevisionID: "00000000-0000-4000-8000-000000000612",
+		ServerSequence: 77, CreatedAt: createdAt, ExpiresAt: expiresAt, Text: exact,
+		Images: []identity.ImageAsset{
+			{AssetIndex: 0, MIMEType: "image/png", Width: 1, Height: 2, ByteSize: 2, StorageKey: "secret-storage-key", Bytes: []byte{1, 2}},
+			{AssetIndex: 1, MIMEType: "image/jpeg", Width: 3, Height: 4, ByteSize: 2, Bytes: []byte{3, 4}},
+		},
+	}}
+	session := connectTestClient(t, service)
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_latest_paste", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if result.IsError || len(result.Content) != 3 {
+		t.Fatalf("content = %#v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok || text.Text != exact {
+		t.Fatalf("text = %#v", result.Content[0])
+	}
+	first, firstOK := result.Content[1].(*mcp.ImageContent)
+	second, secondOK := result.Content[2].(*mcp.ImageContent)
+	if !firstOK || !secondOK || first.MIMEType != "image/png" || second.MIMEType != "image/jpeg" || !bytes.Equal(first.Data, []byte{1, 2}) || !bytes.Equal(second.Data, []byte{3, 4}) {
+		t.Fatalf("images = %#v", result.Content[1:])
+	}
+	metadata, ok := result.StructuredContent.(map[string]any)
+	if !ok || metadata["available"] != true || metadata["kind"] != "content" || metadata["assets"] != float64(2) || metadata["paste_id"] != service.latest.PasteID || metadata["revision_id"] != service.latest.RevisionID || metadata["server_sequence"] != float64(77) {
+		t.Fatalf("metadata = %#v", result.StructuredContent)
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		exact, "secret-storage-key", base64.StdEncoding.EncodeToString([]byte{1, 2}), "ciphertext", "nonce",
+	} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("structured metadata exposed %q: %s", forbidden, encoded)
+		}
 	}
 }
 

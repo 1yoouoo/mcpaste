@@ -135,7 +135,7 @@ Text paste bodies are encrypted with the server keyring before PostgreSQL persis
 
 Connector credentials are separate read-only bearer credentials. They may authenticate to `/v1/mcp` and invoke only `get_latest_paste`; server authorization rejects them on paste mutations, history, sync, events, and device-management APIs. The MCP tool returns exact text in memory and returns a structured empty result when no valid paste exists. It never searches history or exposes deleted content.
 
-On Linux, `mcpaste` stores the connector endpoint and token in a user-owned credential file under `$XDG_CONFIG_HOME/mcpaste/credential.json` or `~/.config/mcpaste/credential.json`, with directory mode `0700` and file mode `0600`. Setup writes client configuration atomically and includes only the absolute command path and MCP endpoint; the bearer token is never written to Codex/Claude configuration, a URL, shell argument, log, or stderr. The local process exposes only the same read tool over STDIO.
+On Linux, `mcpaste` stores the connector endpoint and token in a user-owned credential file under `$XDG_CONFIG_HOME/mcpaste/credential.json` or `~/.config/mcpaste/credential.json`, with directory mode `0700` and file mode `0600`. The service endpoint is injected into the build through `MCPASTE_ENDPOINT`; setup writes client configuration atomically with only the absolute command path, while the bearer token and endpoint are never written to Codex/Claude configuration, a shell argument, log, or stderr. The local process exposes only the same read tool over STDIO.
 
 ## Pre-commit check
 

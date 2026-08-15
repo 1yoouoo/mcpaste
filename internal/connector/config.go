@@ -14,14 +14,13 @@ const configEntryName = "mcpaste"
 
 type ClientConfigOptions struct {
 	CommandPath string
-	Endpoint    string
 	CodexPath   string
 	ClaudePath  string
 }
 
 func ConfigureClients(options ClientConfigOptions) error {
-	if options.CommandPath == "" || options.Endpoint == "" {
-		return errors.New("command path and endpoint are required")
+	if options.CommandPath == "" {
+		return errors.New("command path is required")
 	}
 	commandPath, err := absolutePath(options.CommandPath)
 	if err != nil {
@@ -34,12 +33,12 @@ func ConfigureClients(options ClientConfigOptions) error {
 		options.ClaudePath = detectClaudePath()
 	}
 	if options.CodexPath != "" {
-		if err := ConfigureCodex(options.CodexPath, commandPath, options.Endpoint); err != nil {
+		if err := ConfigureCodex(options.CodexPath, commandPath); err != nil {
 			return err
 		}
 	}
 	if options.ClaudePath != "" {
-		if err := ConfigureClaude(options.ClaudePath, commandPath, options.Endpoint); err != nil {
+		if err := ConfigureClaude(options.ClaudePath, commandPath); err != nil {
 			return err
 		}
 	}
@@ -49,7 +48,7 @@ func ConfigureClients(options ClientConfigOptions) error {
 	return nil
 }
 
-func ConfigureCodex(path, commandPath, endpoint string) error {
+func ConfigureCodex(path, commandPath string) error {
 	commandPath, err := absolutePath(commandPath)
 	if err != nil {
 		return err
@@ -63,12 +62,21 @@ func ConfigureCodex(path, commandPath, endpoint string) error {
 		return errors.New("read Codex configuration")
 	}
 	servers := table(root, "mcp_servers")
-	name, found := existingEntryName(servers, commandPath, endpoint)
+	name, found := existingEntryName(servers, commandPath)
 	if found {
-		return nil
+		entry, ok := servers[name].(map[string]any)
+		if !ok || !removeEndpointOverride(entry) {
+			return nil
+		}
+		root["mcp_servers"] = servers
+		data, err := toml.Marshal(root)
+		if err != nil {
+			return errors.New("write Codex configuration")
+		}
+		return atomicConfigWrite(path, data)
 	}
 	name = availableEntryName(servers)
-	servers[name] = mcpEntry(commandPath, endpoint)
+	servers[name] = mcpEntry(commandPath)
 	root["mcp_servers"] = servers
 	data, err := toml.Marshal(root)
 	if err != nil {
@@ -77,7 +85,7 @@ func ConfigureCodex(path, commandPath, endpoint string) error {
 	return atomicConfigWrite(path, data)
 }
 
-func ConfigureClaude(path, commandPath, endpoint string) error {
+func ConfigureClaude(path, commandPath string) error {
 	commandPath, err := absolutePath(commandPath)
 	if err != nil {
 		return err
@@ -91,12 +99,22 @@ func ConfigureClaude(path, commandPath, endpoint string) error {
 		return errors.New("read Claude Code configuration")
 	}
 	servers := table(root, "mcpServers")
-	name, found := existingEntryName(servers, commandPath, endpoint)
+	name, found := existingEntryName(servers, commandPath)
 	if found {
-		return nil
+		entry, ok := servers[name].(map[string]any)
+		if !ok || !removeEndpointOverride(entry) {
+			return nil
+		}
+		root["mcpServers"] = servers
+		data, err := json.MarshalIndent(root, "", "  ")
+		if err != nil {
+			return errors.New("write Claude Code configuration")
+		}
+		data = append(data, '\n')
+		return atomicConfigWrite(path, data)
 	}
 	name = availableEntryName(servers)
-	servers[name] = mcpEntry(commandPath, endpoint)
+	servers[name] = mcpEntry(commandPath)
 	root["mcpServers"] = servers
 	data, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
@@ -162,28 +180,29 @@ func table(root map[string]any, key string) map[string]any {
 	return result
 }
 
-func mcpEntry(commandPath, endpoint string) map[string]any {
+func mcpEntry(commandPath string) map[string]any {
 	return map[string]any{
 		"command": commandPath,
-		"args":    []any{"--endpoint", endpoint},
+		"args":    []any{},
 	}
 }
 
-func existingEntryName(servers map[string]any, commandPath, endpoint string) (string, bool) {
+func existingEntryName(servers map[string]any, commandPath string) (string, bool) {
 	for name, value := range servers {
 		entry, ok := value.(map[string]any)
-		if ok && matchingEntry(entry, commandPath, endpoint) {
+		if ok && matchingEntry(entry, commandPath) {
 			return name, true
 		}
 	}
 	return "", false
 }
 
-func matchingEntry(entry map[string]any, commandPath, endpoint string) bool {
+func matchingEntry(entry map[string]any, commandPath string) bool {
 	command, ok := entry["command"].(string)
-	if !ok || filepath.Clean(command) != filepath.Clean(commandPath) {
-		return false
-	}
+	return ok && filepath.Clean(command) == filepath.Clean(commandPath)
+}
+
+func removeEndpointOverride(entry map[string]any) bool {
 	args, ok := entry["args"].([]any)
 	if !ok {
 		if stringArgs, ok := entry["args"].([]string); ok {
@@ -195,14 +214,25 @@ func matchingEntry(entry map[string]any, commandPath, endpoint string) bool {
 			return false
 		}
 	}
-	for index := 0; index+1 < len(args); index++ {
+	filtered := make([]any, 0, len(args))
+	changed := false
+	for index := 0; index < len(args); index++ {
 		flag, flagOK := args[index].(string)
-		value, valueOK := args[index+1].(string)
-		if flagOK && valueOK && flag == "--endpoint" && value == endpoint {
-			return true
+		if flagOK && flag == "--endpoint" {
+			changed = true
+			if index+1 < len(args) {
+				if _, valueOK := args[index+1].(string); valueOK {
+					index++
+				}
+			}
+			continue
 		}
+		filtered = append(filtered, args[index])
 	}
-	return false
+	if changed {
+		entry["args"] = filtered
+	}
+	return changed
 }
 
 func availableEntryName(servers map[string]any) string {

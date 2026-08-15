@@ -21,7 +21,12 @@ public final class ImageNormalizer {
     public static let maxNormalizedPNGBytes = 8 * 1024 * 1024
     public static let maxBundleBytes = 32 * 1024 * 1024
     public static let maxBundleItems = 20
+    public static let maxAttachmentItems = 8
     public init() {}
+
+    public static func validateAttachmentCount(_ count: Int) throws {
+        guard (0...maxAttachmentItems).contains(count) else { throw ImageNormalizationError.tooLarge }
+    }
 
     public func normalize(_ data: Data) throws -> NormalizedImage {
         guard data.count <= Self.maxSourceBytes else { throw ImageNormalizationError.tooLarge }

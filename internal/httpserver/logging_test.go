@@ -58,6 +58,34 @@ func TestNewAccessLogMiddlewareLogsMetadataOnly(t *testing.T) {
 	}
 }
 
+func TestLoggingPairingStatusOmitsRequestBodyAndClaimSecret(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	application := NewApplicationHandler(nil, &fakeIdentityAPI{}, nil)
+	handler := NewRecoveryMiddleware(logger)(NewAccessLogMiddleware(logger)(application))
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/pairing-requests/00000000-0000-4000-8000-000000000301/status",
+		strings.NewReader(`{"claim_secret":"pairing-status-body-marker"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+	output := logs.String()
+	if strings.Contains(output, "pairing-status-body-marker") || strings.Contains(output, "claim_secret") {
+		t.Fatal("pairing status access log contains request body data")
+	}
+	entries := decodeLogEntries(t, logs.Bytes())
+	if len(entries) != 1 || entries[0]["path"] != "POST /v1/pairing-requests/{pairing_id}/status" {
+		t.Fatalf("pairing status access log entries = %d", len(entries))
+	}
+}
+
 func TestNewAccessLogMiddlewareDefaultsStatusToOKOnWrite(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))

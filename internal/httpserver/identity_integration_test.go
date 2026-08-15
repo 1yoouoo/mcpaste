@@ -161,6 +161,21 @@ func (h *integrationHarness) createWorkspace(name string) (identity.WorkspaceGra
 	return grant, key, bytes.Clone(body)
 }
 
+func (h *integrationHarness) createPairing(name string) identity.PairingCreateResponse {
+	h.t.Helper()
+	status, _, body := h.request(http.MethodPost, "/v1/pairing-requests", "", h.nextKey(), map[string]any{
+		"proposed_name": name, "platform": "linux", "requested_scope": "connector",
+	})
+	if status != http.StatusCreated {
+		h.t.Fatalf("pairing create status = %d", status)
+	}
+	var pairing identity.PairingCreateResponse
+	if err := json.Unmarshal(body, &pairing); err != nil {
+		h.t.Fatal("decode pairing response")
+	}
+	return pairing
+}
+
 func credential(grant identity.WorkspaceGrant, kind string) string {
 	for _, item := range grant.Credentials {
 		if item.Kind == kind {
@@ -727,6 +742,181 @@ from rate_limit_buckets`).Scan(&rows, &requests); err != nil {
 		t.Fatalf("inspect rate-limit totals: %v", err)
 	}
 	return rows, requests
+}
+
+func TestPairingStatusAndDenyIntegration(t *testing.T) {
+	h := newIntegrationHarness(t)
+	workspace, _, _ := h.createWorkspace("Pairing Status Mac")
+	fullToken := credential(workspace, "full")
+	connectorToken := credential(workspace, "connector")
+	pairing := h.createPairing("Denied Pair")
+	statusPath := "/v1/pairing-requests/" + pairing.PairingID + "/status"
+	denyPath := "/v1/pairing-requests/" + pairing.PairingID + "/deny"
+
+	status, _, body := h.request(http.MethodPost, statusPath, "", "", map[string]any{"claim_secret": pairing.ClaimSecret})
+	if status != http.StatusOK || bytes.Contains(body, []byte(pairing.ClaimSecret)) {
+		t.Fatalf("pending status metadata = %d/%d", status, len(body))
+	}
+	var pending identity.PairingStatusResponse
+	if err := json.Unmarshal(body, &pending); err != nil || pending.PairingID != pairing.PairingID || pending.Status != "pending" || !pending.ExpiresAt.Equal(pairing.ExpiresAt) || pending.ClaimExpiresAt != nil {
+		t.Fatal("pending status response is incorrect")
+	}
+
+	wrongClaim := strings.Repeat("A", 43)
+	status, _, body = h.request(http.MethodPost, statusPath, "", "", map[string]any{"claim_secret": wrongClaim})
+	if status != http.StatusUnauthorized || !bytes.Contains(body, []byte(`"code":"invalid_claim"`)) || bytes.Contains(body, []byte("pending")) {
+		t.Fatalf("invalid claim status metadata = %d/%d", status, len(body))
+	}
+
+	status, _, _ = h.request(http.MethodPost, denyPath, connectorToken, h.nextKey(), map[string]any{})
+	if status != http.StatusForbidden {
+		t.Fatalf("connector denial status = %d", status)
+	}
+	denialKey := h.nextKey()
+	status, _, denialBody := h.request(http.MethodPost, denyPath, fullToken, denialKey, map[string]any{})
+	if status != http.StatusOK || bytes.Contains(denialBody, []byte(pairing.ClaimSecret)) {
+		t.Fatalf("denial response metadata = %d/%d", status, len(denialBody))
+	}
+	var denied identity.PairingStatusResponse
+	if err := json.Unmarshal(denialBody, &denied); err != nil || denied.PairingID != pairing.PairingID || denied.Status != "denied" || !denied.ExpiresAt.Equal(pairing.ExpiresAt) || denied.ClaimExpiresAt != nil {
+		t.Fatal("denial response is incorrect")
+	}
+	status, _, denialReplay := h.request(http.MethodPost, denyPath, fullToken, denialKey, map[string]any{})
+	if status != http.StatusOK || !bytes.Equal(denialBody, denialReplay) {
+		t.Fatal("denial idempotency replay differs")
+	}
+
+	status, _, body = h.request(http.MethodPost, statusPath, "", "", map[string]any{"claim_secret": pairing.ClaimSecret})
+	if status != http.StatusOK || !bytes.Contains(body, []byte(`"status":"denied"`)) || bytes.Contains(body, []byte(pairing.ClaimSecret)) {
+		t.Fatalf("denied status metadata = %d/%d", status, len(body))
+	}
+	status, _, body = h.request(http.MethodPost, statusPath, "", "", map[string]any{"claim_secret": wrongClaim})
+	if status != http.StatusUnauthorized || !bytes.Contains(body, []byte(`"code":"invalid_claim"`)) || bytes.Contains(body, []byte("denied")) {
+		t.Fatalf("denied invalid-claim metadata = %d/%d", status, len(body))
+	}
+	status, _, body = h.request(http.MethodPost, "/v1/pairing-requests/"+pairing.PairingID+"/approve", fullToken, h.nextKey(), map[string]any{})
+	if status != http.StatusGone || !bytes.Contains(body, []byte(`"code":"pairing_denied"`)) {
+		t.Fatalf("approve-after-denial metadata = %d/%d", status, len(body))
+	}
+	status, _, body = h.request(http.MethodPost, "/v1/pairing-requests/"+pairing.PairingID+"/claim", "", "", map[string]any{"claim_secret": pairing.ClaimSecret})
+	if status != http.StatusGone || !bytes.Contains(body, []byte(`"code":"pairing_denied"`)) {
+		t.Fatalf("claim-after-denial metadata = %d/%d", status, len(body))
+	}
+
+	var invalidatedAt, metadataPurgeAt time.Time
+	if err := h.pool.QueryRow(context.Background(), `
+select claim_invalidated_at, metadata_purge_at
+from pairing_requests where id = $1::uuid`, pairing.PairingID).Scan(&invalidatedAt, &metadataPurgeAt); err != nil {
+		t.Fatal("inspect denied pairing metadata")
+	}
+	if metadataPurgeAt.Before(invalidatedAt.Add(identity.PairingMetadataLifetime)) {
+		t.Fatal("denial did not advance metadata retention")
+	}
+
+	approvedPairing := h.createPairing("Approved Pair")
+	status, _, _ = h.request(http.MethodPost, "/v1/pairing-requests/"+approvedPairing.PairingID+"/approve", fullToken, h.nextKey(), map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("approval status = %d", status)
+	}
+	approvedStatusPath := "/v1/pairing-requests/" + approvedPairing.PairingID + "/status"
+	status, _, body = h.request(http.MethodPost, approvedStatusPath, "", "", map[string]any{"claim_secret": approvedPairing.ClaimSecret})
+	var approved identity.PairingStatusResponse
+	if status != http.StatusOK || json.Unmarshal(body, &approved) != nil || approved.Status != "approved" || approved.ClaimExpiresAt == nil {
+		t.Fatalf("approved status metadata = %d/%d", status, len(body))
+	}
+	h.clock.Advance(identity.ClaimLifetime + time.Second)
+	status, _, body = h.request(http.MethodPost, approvedStatusPath, "", "", map[string]any{"claim_secret": approvedPairing.ClaimSecret})
+	if status != http.StatusOK || !bytes.Contains(body, []byte(`"status":"expired"`)) {
+		t.Fatalf("approved expiry status metadata = %d/%d", status, len(body))
+	}
+
+	expiredPairing := h.createPairing("Expired Pending Pair")
+	h.clock.Advance(identity.PairingLifetime + time.Second)
+	expiredStatusPath := "/v1/pairing-requests/" + expiredPairing.PairingID + "/status"
+	status, _, body = h.request(http.MethodPost, expiredStatusPath, "", "", map[string]any{"claim_secret": expiredPairing.ClaimSecret})
+	if status != http.StatusOK || !bytes.Contains(body, []byte(`"status":"expired"`)) {
+		t.Fatalf("pending expiry status metadata = %d/%d", status, len(body))
+	}
+	status, _, body = h.request(http.MethodPost, expiredStatusPath, "", "", map[string]any{"claim_secret": wrongClaim})
+	if status != http.StatusUnauthorized || !bytes.Contains(body, []byte(`"code":"invalid_claim"`)) || bytes.Contains(body, []byte("expired")) {
+		t.Fatalf("expired invalid-claim metadata = %d/%d", status, len(body))
+	}
+}
+
+func TestPairingStatusHidesUnknownPairingID(t *testing.T) {
+	h := newIntegrationHarness(t)
+	pairing := h.createPairing("Status Proof Pair")
+	invalidClaim := strings.Repeat("A", 43)
+
+	knownStatus, knownHeaders, knownBody := h.request(
+		http.MethodPost,
+		"/v1/pairing-requests/"+pairing.PairingID+"/status",
+		"",
+		"",
+		map[string]any{"claim_secret": invalidClaim},
+	)
+	unknownStatus, unknownHeaders, unknownBody := h.request(
+		http.MethodPost,
+		"/v1/pairing-requests/00000000-0000-4000-8000-000000000099/status",
+		"",
+		"",
+		map[string]any{"claim_secret": invalidClaim},
+	)
+
+	const contentType = "application/json"
+	expectedBody := []byte("{\"error\":{\"code\":\"invalid_claim\"}}\n")
+	if knownStatus != http.StatusUnauthorized || knownHeaders.Get("Content-Type") != contentType || !bytes.Equal(knownBody, expectedBody) {
+		t.Fatalf("existing-pairing response metadata = %d/%q/%d", knownStatus, knownHeaders.Get("Content-Type"), len(knownBody))
+	}
+	if unknownStatus != knownStatus || unknownHeaders.Get("Content-Type") != knownHeaders.Get("Content-Type") || !bytes.Equal(unknownBody, knownBody) {
+		t.Fatalf("unknown-pairing response differs = %d/%q/%d", unknownStatus, unknownHeaders.Get("Content-Type"), len(unknownBody))
+	}
+	for _, body := range [][]byte{knownBody, unknownBody} {
+		for _, state := range []string{"pending", "approved", "denied", "expired"} {
+			if bytes.Contains(body, []byte(state)) {
+				t.Fatalf("pairing response exposed state %q", state)
+			}
+		}
+	}
+}
+
+func TestPairingPollingRateLimit(t *testing.T) {
+	h := newIntegrationHarness(t)
+	pairing := h.createPairing("Polling Pair")
+	statusPath := "/v1/pairing-requests/" + pairing.PairingID + "/status"
+	for attempt := 0; attempt < 30; attempt++ {
+		status, _, _ := h.request(http.MethodPost, statusPath, "", "", map[string]any{"claim_secret": pairing.ClaimSecret})
+		if status != http.StatusOK {
+			t.Fatalf("poll %d status = %d", attempt+1, status)
+		}
+		if attempt < 29 {
+			h.clock.Advance(10 * time.Second)
+		}
+	}
+	if got := rateLimitCount(t, h, "pairing.status.ip", "ip:192.0.2.20"); got != 30 {
+		t.Fatalf("status IP quota count = %d", got)
+	}
+	if got := rateLimitCount(t, h, "pairing.status.id", pairing.PairingID); got != 30 {
+		t.Fatalf("status pairing quota count = %d", got)
+	}
+
+	claimPath := "/v1/pairing-requests/" + pairing.PairingID + "/claim"
+	for attempt := 0; attempt < 10; attempt++ {
+		status, _, _ := h.request(http.MethodPost, claimPath, "", "", map[string]any{"claim_secret": pairing.ClaimSecret})
+		if status != http.StatusConflict {
+			t.Fatalf("claim attempt %d status = %d", attempt+1, status)
+		}
+	}
+	status, _, _ := h.request(http.MethodPost, claimPath, "", "", map[string]any{"claim_secret": pairing.ClaimSecret})
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("claim quota status = %d", status)
+	}
+	if got := rateLimitCount(t, h, "pairing.claim.ip", "ip:192.0.2.20"); got != 11 {
+		t.Fatalf("claim IP quota count = %d", got)
+	}
+	if got := rateLimitCount(t, h, "pairing.claim.id", pairing.PairingID); got != 10 {
+		t.Fatalf("claim pairing quota count = %d", got)
+	}
 }
 
 func assertFixedRateLimit(

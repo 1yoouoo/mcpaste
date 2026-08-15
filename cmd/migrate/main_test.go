@@ -3,7 +3,24 @@ package main
 import (
 	"context"
 	"testing"
+
+	"github.com/1yoouoo/mcpaste/db/migrations"
+	"github.com/1yoouoo/mcpaste/internal/database/migrate"
 )
+
+func TestEmbeddedMigrationsIncludePairingPendingDenialLast(t *testing.T) {
+	available, err := migrate.Load(migrations.Files)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(available) != 6 {
+		t.Fatalf("available migrations = %d, want 6", len(available))
+	}
+	last := available[len(available)-1]
+	if last.Version != 6 || last.Name != "pairing_pending_denial" {
+		t.Fatalf("last migration = %06d_%s", last.Version, last.Name)
+	}
+}
 
 func TestRunRejectsInvalidArgsBeforeExternalAccess(t *testing.T) {
 	tests := map[string]struct {

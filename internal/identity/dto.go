@@ -48,6 +48,13 @@ type PairingDetails struct {
 	ClaimExpiresAt *time.Time `json:"claim_expires_at,omitempty"`
 }
 
+type PairingStatusResponse struct {
+	PairingID      string     `json:"pairing_id"`
+	Status         string     `json:"status"`
+	ExpiresAt      time.Time  `json:"expires_at"`
+	ClaimExpiresAt *time.Time `json:"claim_expires_at,omitempty"`
+}
+
 type ApprovalResponse struct {
 	PairingID      string    `json:"pairing_id"`
 	Status         string    `json:"status"`
@@ -55,37 +62,39 @@ type ApprovalResponse struct {
 }
 
 type PasteResponse struct {
-	PasteID        string               `json:"paste_id"`
-	RevisionID     string               `json:"revision_id"`
-	Kind           string               `json:"kind"`
-	ServerSequence int64                `json:"server_sequence"`
-	CreatedAt      time.Time            `json:"created_at"`
-	ExpiresAt      time.Time            `json:"expires_at"`
-	Deleted        bool                 `json:"deleted"`
-	Text           *string              `json:"text,omitempty"`
-	Assets         []ImageAssetResponse `json:"assets,omitempty"`
+	PasteID              string               `json:"paste_id"`
+	RevisionID           string               `json:"revision_id"`
+	AttachmentRevisionID string               `json:"attachment_revision_id,omitempty"`
+	Kind                 string               `json:"kind"`
+	ServerSequence       int64                `json:"server_sequence"`
+	CreatedAt            time.Time            `json:"created_at"`
+	ExpiresAt            time.Time            `json:"expires_at"`
+	Deleted              bool                 `json:"deleted"`
+	Text                 *string              `json:"text,omitempty"`
+	Assets               []ImageAssetResponse `json:"assets,omitempty"`
 }
 
 type ImageAssetResponse struct {
-	AssetIndex int    `json:"asset_index"`
-	MIMEType   string `json:"mime_type"`
-	Width      int    `json:"width"`
-	Height     int    `json:"height"`
-	ByteSize   int64  `json:"byte_size"`
+	AssetIndex int       `json:"asset_index"`
+	MIMEType   string    `json:"mime_type"`
+	Width      int       `json:"width"`
+	Height     int       `json:"height"`
+	ByteSize   int64     `json:"byte_size"`
+	ExpiresAt  time.Time `json:"expires_at"`
 }
 
 type SyncEventResponse struct {
-	Sequence       int64                `json:"sequence"`
-	EventType      string               `json:"event_type"`
-	PasteID        string               `json:"paste_id"`
-	RevisionID     string               `json:"revision_id"`
-	Kind           string               `json:"kind"`
-	ServerSequence int64                `json:"server_sequence"`
-	CreatedAt      time.Time            `json:"created_at"`
-	ExpiresAt      time.Time            `json:"expires_at"`
-	Deleted        bool                 `json:"deleted"`
-	Text           *string              `json:"text,omitempty"`
-	Assets         []ImageAssetResponse `json:"assets,omitempty"`
+	Sequence       int64                 `json:"sequence"`
+	EventType      string                `json:"event_type"`
+	PasteID        string                `json:"paste_id"`
+	RevisionID     string                `json:"revision_id"`
+	Kind           string                `json:"kind"`
+	ServerSequence int64                 `json:"server_sequence"`
+	CreatedAt      time.Time             `json:"created_at"`
+	ExpiresAt      time.Time             `json:"expires_at"`
+	Deleted        bool                  `json:"deleted"`
+	Text           *string               `json:"text,omitempty"`
+	Assets         *[]ImageAssetResponse `json:"assets,omitempty"`
 }
 
 type SyncResponse struct {

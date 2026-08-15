@@ -16,6 +16,8 @@ type identityAPI interface {
 	PairingByShortCode(context.Context, identity.Principal, string) (identity.PairingDetails, error)
 	ApprovePairing(context.Context, identity.Principal, string, string) (identity.Result, error)
 	ClaimPairing(context.Context, string, string, string) (identity.Result, error)
+	PairingStatus(context.Context, string, string, string) (identity.PairingStatusResponse, error)
+	DenyPairing(context.Context, identity.Principal, string, string) (identity.Result, error)
 	ListDevices(context.Context, identity.Principal) ([]identity.DeviceSummary, error)
 	RenameDevice(context.Context, identity.Principal, string, string, identity.RenameInput) (identity.Result, error)
 	RevokeDevice(context.Context, identity.Principal, string, string) (identity.Result, error)

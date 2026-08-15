@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/1yoouoo/mcpaste/internal/identity"
+	"github.com/1yoouoo/mcpaste/internal/images"
 	"github.com/1yoouoo/mcpaste/internal/secure"
 	"github.com/1yoouoo/mcpaste/internal/testdb"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,6 +24,879 @@ const workspaceTwo = "00000000-0000-4000-8000-000000000102"
 const deviceOne = "00000000-0000-4000-8000-000000000201"
 
 var cleanupTestApplicationCounter atomic.Uint64
+
+type pausingSnapshotTx struct {
+	pgx.Tx
+	cursorRead chan<- struct{}
+	resume     <-chan struct{}
+}
+
+func (tx *pausingSnapshotTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	row := tx.Tx.QueryRow(ctx, sql, args...)
+	if !strings.Contains(strings.ToLower(sql), "select next_event_sequence from workspaces") {
+		return row
+	}
+	return &pausingSnapshotRow{Row: row, ctx: ctx, cursorRead: tx.cursorRead, resume: tx.resume}
+}
+
+type pausingSnapshotRow struct {
+	pgx.Row
+	ctx        context.Context
+	cursorRead chan<- struct{}
+	resume     <-chan struct{}
+}
+
+func (row *pausingSnapshotRow) Scan(dest ...any) error {
+	if err := row.Row.Scan(dest...); err != nil {
+		return err
+	}
+	select {
+	case row.cursorRead <- struct{}{}:
+	case <-row.ctx.Done():
+		return row.ctx.Err()
+	}
+	select {
+	case <-row.resume:
+		return nil
+	case <-row.ctx.Done():
+		return row.ctx.Err()
+	}
+}
+
+func TestAppendTextRevisionRejectsContentAfterTombstoneWithoutAdvancingWorkspace(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	createdAt := time.Date(2026, 8, 14, 6, 0, 0, 0, time.UTC)
+	workspaceID := "00000000-0000-4000-8000-000000001101"
+	pasteID := "00000000-0000-4000-8000-000000001102"
+	contentRevisionID := "00000000-0000-4000-8000-000000001103"
+	tombstoneRevisionID := "00000000-0000-4000-8000-000000001104"
+	staleRevisionID := "00000000-0000-4000-8000-000000001105"
+
+	if err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceID, createdAt); err != nil {
+			return err
+		}
+		if err := tx.InsertPaste(ctx, workspaceID, pasteID, createdAt); err != nil {
+			return err
+		}
+		_, err := tx.AppendTextRevision(
+			ctx, workspaceID, pasteID, contentRevisionID,
+			identity.RevisionContent, "paste.created", aggregateEnvelope(0x71),
+			createdAt, createdAt.AddDate(1, 0, 0),
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("seed text paste: %v", err)
+	}
+
+	tombstoneAt := createdAt.Add(time.Minute)
+	if err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		_, err := tx.AppendTextRevision(
+			ctx, workspaceID, pasteID, tombstoneRevisionID,
+			identity.RevisionTombstone, "paste.deleted", secure.Envelope{},
+			tombstoneAt, tombstoneAt.AddDate(1, 0, 0),
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("tombstone text paste: %v", err)
+	}
+
+	var staleRevision identity.TextRevision
+	var appendErr error
+	updateAt := tombstoneAt.Add(time.Minute)
+	if err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		staleRevision, appendErr = tx.AppendTextRevision(
+			ctx, workspaceID, pasteID, staleRevisionID,
+			identity.RevisionContent, "paste.revised", aggregateEnvelope(0x72),
+			updateAt, updateAt.AddDate(1, 0, 0),
+		)
+		return nil
+	}); err != nil {
+		t.Fatalf("commit rejected stale update transaction: %v", err)
+	}
+	if !errors.Is(appendErr, identity.ErrNotFound) {
+		t.Errorf("AppendTextRevision() after tombstone error = %v, want %v", appendErr, identity.ErrNotFound)
+	}
+	if staleRevision.RevisionID != "" || staleRevision.ServerSequence != 0 {
+		t.Errorf("AppendTextRevision() after tombstone revision = %#v, want zero value", staleRevision)
+	}
+
+	var sequence int64
+	var revisionCount, contentRevisionCount, staleRevisionCount, revisedEventCount int
+	if err := pool.QueryRow(ctx, `
+select w.next_event_sequence,
+       (select count(*) from paste_revisions r
+        where r.workspace_id = w.id and r.paste_id = $2::uuid),
+       (select count(*) from paste_revisions r
+        where r.workspace_id = w.id and r.paste_id = $2::uuid and r.revision_kind = $3),
+       (select count(*) from paste_revisions r
+        where r.workspace_id = w.id and r.paste_id = $2::uuid and r.id = $4::uuid),
+       (select count(*) from workspace_events e
+        where e.workspace_id = w.id and e.object_id = $2::uuid and e.event_type = 'paste.revised')
+from workspaces w
+where w.id = $1::uuid`, workspaceID, pasteID, identity.RevisionContent, staleRevisionID).Scan(
+		&sequence, &revisionCount, &contentRevisionCount, &staleRevisionCount, &revisedEventCount,
+	); err != nil {
+		t.Fatalf("inspect post-tombstone update state: %v", err)
+	}
+	if sequence != 2 || revisionCount != 2 || contentRevisionCount != 1 || staleRevisionCount != 0 || revisedEventCount != 0 {
+		t.Errorf(
+			"post-tombstone update state = sequence:%d revisions:%d content:%d stale:%d revised-events:%d, want 2/2/1/0/0",
+			sequence, revisionCount, contentRevisionCount, staleRevisionCount, revisedEventCount,
+		)
+	}
+
+	var aggregate identity.PasteAggregate
+	if err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		var err error
+		aggregate, err = tx.PasteAggregate(ctx, workspaceID, pasteID, updateAt)
+		return err
+	}); err != nil {
+		t.Fatalf("read aggregate after rejected update: %v", err)
+	}
+	if !aggregate.Deleted || aggregate.RevisionID != tombstoneRevisionID || aggregate.ServerSequence != 2 || aggregate.TextRevision != nil || aggregate.AttachmentRevision != nil {
+		t.Errorf("aggregate after rejected update = %#v, want deleted tombstone at sequence 2", aggregate)
+	}
+}
+
+func TestAppendTextRevisionSerializesBehindConcurrentTombstone(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool := testdb.New(t)
+	store := New(pool)
+	createdAt := time.Date(2026, 8, 14, 6, 30, 0, 0, time.UTC)
+	workspaceID := "00000000-0000-4000-8000-000000001111"
+	pasteID := "00000000-0000-4000-8000-000000001112"
+	if err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceID, createdAt); err != nil {
+			return err
+		}
+		if err := tx.InsertPaste(ctx, workspaceID, pasteID, createdAt); err != nil {
+			return err
+		}
+		_, err := tx.AppendTextRevision(
+			ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000001113",
+			identity.RevisionContent, "paste.created", aggregateEnvelope(0x73),
+			createdAt, createdAt.AddDate(1, 0, 0),
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("seed concurrent text paste: %v", err)
+	}
+
+	releaseTombstone := make(chan struct{})
+	tombstoneLocked := make(chan int, 1)
+	tombstoneDone := make(chan error, 1)
+	go func() {
+		err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+			postgresTx := tx.(*txStore)
+			var backendPID int
+			if err := postgresTx.tx.QueryRow(ctx, `select pg_backend_pid()`).Scan(&backendPID); err != nil {
+				return err
+			}
+			tombstoneAt := createdAt.Add(time.Minute)
+			if _, err := tx.AppendTextRevision(
+				ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000001114",
+				identity.RevisionTombstone, "paste.deleted", secure.Envelope{},
+				tombstoneAt, tombstoneAt.AddDate(1, 0, 0),
+			); err != nil {
+				return err
+			}
+			tombstoneLocked <- backendPID
+			select {
+			case <-releaseTombstone:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+		tombstoneDone <- err
+	}()
+
+	var tombstoneBackendPID int
+	select {
+	case tombstoneBackendPID = <-tombstoneLocked:
+	case err := <-tombstoneDone:
+		t.Fatalf("tombstone transaction ended before pause: %v", err)
+	case <-ctx.Done():
+		t.Fatal("tombstone transaction did not reach commit pause")
+	}
+
+	type textOutcome struct {
+		revision identity.TextRevision
+		err      error
+	}
+	staleRevisionID := "00000000-0000-4000-8000-000000001115"
+	updateStarted := make(chan int, 1)
+	updateDone := make(chan textOutcome, 1)
+	updateComplete := make(chan struct{})
+	go func() {
+		var revision identity.TextRevision
+		err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+			postgresTx := tx.(*txStore)
+			var backendPID int
+			if err := postgresTx.tx.QueryRow(ctx, `select pg_backend_pid()`).Scan(&backendPID); err != nil {
+				return err
+			}
+			updateStarted <- backendPID
+			var err error
+			updateAt := createdAt.Add(2 * time.Minute)
+			revision, err = tx.AppendTextRevision(
+				ctx, workspaceID, pasteID, staleRevisionID,
+				identity.RevisionContent, "paste.revised", aggregateEnvelope(0x74),
+				updateAt, updateAt.AddDate(1, 0, 0),
+			)
+			return err
+		})
+		updateDone <- textOutcome{revision: revision, err: err}
+		close(updateComplete)
+	}()
+
+	var updateBackendPID int
+	select {
+	case updateBackendPID = <-updateStarted:
+	case <-ctx.Done():
+		t.Fatal("concurrent stale update did not start")
+	}
+	waitForBackendBlockedBy(t, ctx, pool, updateBackendPID, tombstoneBackendPID, updateComplete)
+	close(releaseTombstone)
+	if err := <-tombstoneDone; err != nil {
+		t.Fatalf("commit tombstone transaction: %v", err)
+	}
+	update := <-updateDone
+	if !errors.Is(update.err, identity.ErrNotFound) || update.revision.RevisionID != "" || update.revision.ServerSequence != 0 {
+		t.Errorf("concurrent update after tombstone = %#v, %v", update.revision, update.err)
+	}
+
+	var sequence int64
+	var contentRevisionCount, staleRevisionCount, revisedEventCount int
+	var latestKind string
+	if err := pool.QueryRow(ctx, `
+select w.next_event_sequence,
+       (select count(*) from paste_revisions r
+        where r.workspace_id = w.id and r.paste_id = $2::uuid and r.revision_kind = $3),
+       (select count(*) from paste_revisions r
+        where r.workspace_id = w.id and r.paste_id = $2::uuid and r.id = $4::uuid),
+       (select count(*) from workspace_events e
+        where e.workspace_id = w.id and e.object_id = $2::uuid and e.event_type = 'paste.revised'),
+       (select r.revision_kind from paste_revisions r
+        where r.workspace_id = w.id and r.paste_id = $2::uuid
+        order by r.server_sequence desc limit 1)
+from workspaces w
+where w.id = $1::uuid`, workspaceID, pasteID, identity.RevisionContent, staleRevisionID).Scan(
+		&sequence, &contentRevisionCount, &staleRevisionCount, &revisedEventCount, &latestKind,
+	); err != nil {
+		t.Fatalf("inspect concurrent tombstone result: %v", err)
+	}
+	if sequence != 2 || contentRevisionCount != 1 || staleRevisionCount != 0 || revisedEventCount != 0 || latestKind != identity.RevisionTombstone {
+		t.Errorf(
+			"concurrent tombstone state = sequence:%d content:%d stale:%d revised-events:%d latest:%q, want 2/1/0/0/%q",
+			sequence, contentRevisionCount, staleRevisionCount, revisedEventCount, latestKind, identity.RevisionTombstone,
+		)
+	}
+}
+
+func TestAppendAttachmentRevisionPersistsOrderedAssetsAndExplicitClear(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	createdAt := time.Date(2026, 8, 14, 7, 0, 0, 0, time.UTC)
+	workspaceID := "00000000-0000-4000-8000-000000000961"
+	pasteID := "00000000-0000-4000-8000-000000000962"
+	attachmentID := "00000000-0000-4000-8000-000000000964"
+	clearID := "00000000-0000-4000-8000-000000000965"
+	attachmentAt := createdAt.Add(time.Minute)
+	assets := []identity.ImageAsset{
+		aggregateAsset(1, "append/one", attachmentAt.Add(identity.ImageLifetime)),
+		aggregateAsset(0, "append/zero", attachmentAt.Add(identity.ImageLifetime)),
+	}
+	assets[0].Envelope.Ciphertext = []byte{0x31}
+	assets[0].Bytes = []byte{0x41}
+	assets[1].Envelope.Ciphertext = []byte{0x30}
+	assets[1].Bytes = []byte{0x40}
+
+	var attachment, clear identity.TextRevision
+	var ordered, cleared []identity.ImageAsset
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceID, createdAt); err != nil {
+			return err
+		}
+		if err := tx.InsertPaste(ctx, workspaceID, pasteID, createdAt); err != nil {
+			return err
+		}
+		if _, err := tx.AppendTextRevision(
+			ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000963",
+			identity.RevisionContent, "paste.created", aggregateEnvelope(0x81),
+			createdAt, createdAt.AddDate(1, 0, 0),
+		); err != nil {
+			return err
+		}
+		var err error
+		attachment, err = tx.AppendAttachmentRevision(
+			ctx, workspaceID, pasteID, attachmentID, "paste.revised", assets,
+			attachmentAt, attachmentAt.Add(identity.ImageLifetime),
+		)
+		if err != nil {
+			return err
+		}
+		for index := range assets {
+			assets[index].StorageKey = "mutated-after-append"
+			assets[index].Envelope.Nonce[0] = 0xff
+			assets[index].Envelope.Ciphertext[0] = 0xff
+			assets[index].Bytes[0] = 0xff
+		}
+		ordered, err = tx.ListImageAssets(ctx, workspaceID, pasteID, attachmentID)
+		if err != nil {
+			return err
+		}
+		clearAt := createdAt.Add(2 * time.Minute)
+		clear, err = tx.AppendAttachmentRevision(
+			ctx, workspaceID, pasteID, clearID, "paste.revised", nil,
+			clearAt, clearAt.Add(identity.ImageLifetime),
+		)
+		if err != nil {
+			return err
+		}
+		cleared, err = tx.ListImageAssets(ctx, workspaceID, pasteID, clearID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("append attachment transaction: %v", err)
+	}
+	if attachment.RevisionKind != identity.RevisionAttachmentBundle || attachment.ServerSequence != 2 || len(attachment.Assets) != 2 {
+		t.Fatalf("AppendAttachmentRevision() = %#v", attachment)
+	}
+	if first := attachment.Assets[0]; first.AssetIndex != 0 || first.StorageKey != "append/zero" || first.Envelope.Nonce[0] != 0x01 || !bytes.Equal(first.Envelope.Ciphertext, []byte{0x30}) || !bytes.Equal(first.Bytes, []byte{0x40}) {
+		t.Fatalf("first copied attachment asset = %#v", first)
+	}
+	if second := attachment.Assets[1]; second.AssetIndex != 1 || second.StorageKey != "append/one" || second.Envelope.Nonce[0] != 0x02 || !bytes.Equal(second.Envelope.Ciphertext, []byte{0x31}) || !bytes.Equal(second.Bytes, []byte{0x41}) {
+		t.Fatalf("second copied attachment asset = %#v", second)
+	}
+	if len(ordered) != 2 || ordered[0].AssetIndex != 0 || ordered[1].AssetIndex != 1 {
+		t.Fatalf("ordered attachment assets = %#v", ordered)
+	}
+	if clear.RevisionKind != identity.RevisionAttachmentBundle || clear.ServerSequence != 3 || clear.Assets == nil || len(clear.Assets) != 0 || len(cleared) != 0 {
+		t.Fatalf("explicit clear revision/assets = %#v / %#v", clear, cleared)
+	}
+	var pasteKind string
+	var sequence int64
+	var attachmentRevisions, attachmentAssets, attachmentEvents int
+	if err := pool.QueryRow(ctx, `
+select p.paste_kind, w.next_event_sequence,
+       (select count(*) from paste_revisions r where r.workspace_id = p.workspace_id and r.paste_id = p.id and r.revision_kind = $3),
+       (select count(*) from paste_assets a where a.workspace_id = p.workspace_id and a.paste_id = p.id),
+       (select count(*) from workspace_events e where e.workspace_id = p.workspace_id and e.object_id = p.id and e.event_type = 'paste.revised')
+from pastes p
+join workspaces w on w.id = p.workspace_id
+where p.workspace_id = $1::uuid and p.id = $2::uuid`, workspaceID, pasteID, identity.RevisionAttachmentBundle).Scan(
+		&pasteKind, &sequence, &attachmentRevisions, &attachmentAssets, &attachmentEvents,
+	); err != nil {
+		t.Fatalf("inspect attachment persistence: %v", err)
+	}
+	if pasteKind != "text" || sequence != 3 || attachmentRevisions != 2 || attachmentAssets != 2 || attachmentEvents != 2 {
+		t.Fatalf("attachment persistence = kind:%s sequence:%d revisions:%d assets:%d events:%d", pasteKind, sequence, attachmentRevisions, attachmentAssets, attachmentEvents)
+	}
+}
+
+func TestAppendAttachmentRevisionRejectsPasteWithoutRevisionBeforeSequenceAllocation(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	createdAt := time.Date(2026, 8, 14, 7, 30, 0, 0, time.UTC)
+	workspaceID := "00000000-0000-4000-8000-000000000966"
+	pasteID := "00000000-0000-4000-8000-000000000967"
+
+	var appendErr error
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceID, createdAt); err != nil {
+			return err
+		}
+		if err := tx.InsertPaste(ctx, workspaceID, pasteID, createdAt); err != nil {
+			return err
+		}
+		_, appendErr = tx.AppendAttachmentRevision(
+			ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000968", "paste.revised", nil,
+			createdAt, createdAt.Add(identity.ImageLifetime),
+		)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bare paste attachment transaction: %v", err)
+	}
+	if !errors.Is(appendErr, identity.ErrNotFound) {
+		t.Fatalf("bare paste AppendAttachmentRevision() error = %v", appendErr)
+	}
+	var sequence int64
+	if err := pool.QueryRow(ctx, `select next_event_sequence from workspaces where id = $1::uuid`, workspaceID).Scan(&sequence); err != nil {
+		t.Fatalf("read bare paste sequence: %v", err)
+	}
+	if sequence != 0 {
+		t.Fatalf("next_event_sequence after bare paste rejection = %d, want 0", sequence)
+	}
+}
+
+func TestAppendAttachmentRevisionRejectsInvalidModernIndexesBeforeSequenceAllocation(t *testing.T) {
+	tests := []struct {
+		name    string
+		indexes []int
+	}{
+		{name: "sparse", indexes: []int{1}},
+		{name: "duplicate", indexes: []int{0, 0}},
+		{name: "negative", indexes: []int{-1}},
+		{name: "legacy-only", indexes: []int{8}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := testdb.New(t)
+			store := New(pool)
+			createdAt := time.Date(2026, 8, 14, 7, 45, 0, 0, time.UTC)
+			workspaceID := "00000000-0000-4000-8000-000000000969"
+			pasteID := "00000000-0000-4000-8000-000000000970"
+			assets := make([]identity.ImageAsset, len(test.indexes))
+			for index, assetIndex := range test.indexes {
+				assets[index] = aggregateAsset(assetIndex, fmt.Sprintf("append/invalid/%d", index), createdAt.Add(identity.ImageLifetime))
+			}
+
+			var appendErr error
+			err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+				if err := tx.InsertWorkspace(ctx, workspaceID, createdAt); err != nil {
+					return err
+				}
+				if err := tx.InsertPaste(ctx, workspaceID, pasteID, createdAt); err != nil {
+					return err
+				}
+				if _, err := tx.AppendTextRevision(
+					ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000971",
+					identity.RevisionContent, "paste.created", aggregateEnvelope(0x82),
+					createdAt, createdAt.AddDate(1, 0, 0),
+				); err != nil {
+					return err
+				}
+				_, appendErr = tx.AppendAttachmentRevision(
+					ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000972", "paste.revised", assets,
+					createdAt.Add(time.Minute), createdAt.Add(time.Minute).Add(identity.ImageLifetime),
+				)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("invalid attachment index transaction: %v", err)
+			}
+			if !errors.Is(appendErr, identity.ErrInvalid) {
+				t.Fatalf("AppendAttachmentRevision() indexes %v error = %v", test.indexes, appendErr)
+			}
+			var sequence int64
+			if err := pool.QueryRow(ctx, `select next_event_sequence from workspaces where id = $1::uuid`, workspaceID).Scan(&sequence); err != nil {
+				t.Fatalf("read invalid attachment index sequence: %v", err)
+			}
+			if sequence != 1 {
+				t.Fatalf("next_event_sequence after indexes %v = %d, want 1", test.indexes, sequence)
+			}
+		})
+	}
+}
+
+func TestAppendAttachmentRevisionValidatesTargetCountAndEvent(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	createdAt := time.Date(2026, 8, 14, 8, 0, 0, 0, time.UTC)
+	workspaceID := "00000000-0000-4000-8000-000000000971"
+	pasteID := "00000000-0000-4000-8000-000000000972"
+	overLimit := make([]identity.ImageAsset, images.MaxAttachmentItems+1)
+	for index := range overLimit {
+		overLimit[index] = aggregateAsset(index, fmt.Sprintf("append/limit/%d", index), createdAt.Add(identity.ImageLifetime))
+	}
+
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceID, createdAt); err != nil {
+			return err
+		}
+		if err := tx.InsertPaste(ctx, workspaceID, pasteID, createdAt); err != nil {
+			return err
+		}
+		if _, err := tx.AppendTextRevision(
+			ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000973",
+			identity.RevisionContent, "paste.created", aggregateEnvelope(0x91),
+			createdAt, createdAt.AddDate(1, 0, 0),
+		); err != nil {
+			return err
+		}
+		if _, err := tx.AppendAttachmentRevision(
+			ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000974", "paste.created", nil,
+			createdAt, createdAt.Add(identity.ImageLifetime),
+		); !errors.Is(err, identity.ErrInvalid) {
+			t.Fatalf("paste.created attachment error = %v", err)
+		}
+		if _, err := tx.AppendAttachmentRevision(
+			ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000975", "paste.revised", overLimit,
+			createdAt, createdAt.Add(identity.ImageLifetime),
+		); !errors.Is(err, identity.ErrInvalid) {
+			t.Fatalf("over-limit attachment error = %v", err)
+		}
+		if _, err := tx.AppendAttachmentRevision(
+			ctx, workspaceID, "00000000-0000-4000-8000-000000000979", "00000000-0000-4000-8000-000000000976", "paste.revised", nil,
+			createdAt, createdAt.Add(identity.ImageLifetime),
+		); !errors.Is(err, identity.ErrNotFound) {
+			t.Fatalf("missing paste attachment error = %v", err)
+		}
+		tombstoneAt := createdAt.Add(time.Minute)
+		if _, err := tx.AppendTextRevision(
+			ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000977",
+			identity.RevisionTombstone, "paste.deleted", secure.Envelope{},
+			tombstoneAt, tombstoneAt.AddDate(1, 0, 0),
+		); err != nil {
+			return err
+		}
+		if _, err := tx.AppendAttachmentRevision(
+			ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000978", "paste.revised", nil,
+			tombstoneAt, tombstoneAt.Add(identity.ImageLifetime),
+		); !errors.Is(err, identity.ErrNotFound) {
+			t.Fatalf("tombstoned paste attachment error = %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("attachment validation transaction: %v", err)
+	}
+	var sequence int64
+	if err := pool.QueryRow(ctx, `select next_event_sequence from workspaces where id = $1::uuid`, workspaceID).Scan(&sequence); err != nil {
+		t.Fatalf("read attachment validation sequence: %v", err)
+	}
+	if sequence != 2 {
+		t.Fatalf("next_event_sequence after rejected attachments = %d, want 2", sequence)
+	}
+}
+
+func TestAppendAttachmentRevisionSerializesBehindConcurrentTombstone(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool := testdb.New(t)
+	store := New(pool)
+	createdAt := time.Date(2026, 8, 14, 8, 30, 0, 0, time.UTC)
+	workspaceID := "00000000-0000-4000-8000-000000000973"
+	pasteID := "00000000-0000-4000-8000-000000000974"
+	if err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceID, createdAt); err != nil {
+			return err
+		}
+		if err := tx.InsertPaste(ctx, workspaceID, pasteID, createdAt); err != nil {
+			return err
+		}
+		_, err := tx.AppendTextRevision(
+			ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000975",
+			identity.RevisionContent, "paste.created", aggregateEnvelope(0x92),
+			createdAt, createdAt.AddDate(1, 0, 0),
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("seed tombstone race: %v", err)
+	}
+
+	releaseTombstone := make(chan struct{})
+	tombstoneLocked := make(chan int, 1)
+	tombstoneDone := make(chan error, 1)
+	go func() {
+		err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+			postgresTx := tx.(*txStore)
+			var backendPID int
+			if err := postgresTx.tx.QueryRow(ctx, `select pg_backend_pid()`).Scan(&backendPID); err != nil {
+				return err
+			}
+			tombstoneAt := createdAt.Add(time.Minute)
+			if _, err := tx.AppendTextRevision(
+				ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000976",
+				identity.RevisionTombstone, "paste.deleted", secure.Envelope{},
+				tombstoneAt, tombstoneAt.AddDate(1, 0, 0),
+			); err != nil {
+				return err
+			}
+			tombstoneLocked <- backendPID
+			select {
+			case <-releaseTombstone:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+		tombstoneDone <- err
+	}()
+
+	var tombstoneBackendPID int
+	select {
+	case tombstoneBackendPID = <-tombstoneLocked:
+	case err := <-tombstoneDone:
+		t.Fatalf("tombstone transaction ended before pause: %v", err)
+	case <-ctx.Done():
+		t.Fatal("tombstone transaction did not reach commit pause")
+	}
+
+	type attachmentOutcome struct {
+		revision identity.TextRevision
+		err      error
+	}
+	attachmentStarted := make(chan int, 1)
+	attachmentDone := make(chan attachmentOutcome, 1)
+	attachmentComplete := make(chan struct{})
+	go func() {
+		var revision identity.TextRevision
+		err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+			postgresTx := tx.(*txStore)
+			var backendPID int
+			if err := postgresTx.tx.QueryRow(ctx, `select pg_backend_pid()`).Scan(&backendPID); err != nil {
+				return err
+			}
+			attachmentStarted <- backendPID
+			var err error
+			revision, err = tx.AppendAttachmentRevision(
+				ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000977", "paste.revised", nil,
+				createdAt.Add(2*time.Minute), createdAt.Add(2*time.Minute).Add(identity.ImageLifetime),
+			)
+			return err
+		})
+		attachmentDone <- attachmentOutcome{revision: revision, err: err}
+		close(attachmentComplete)
+	}()
+
+	var attachmentBackendPID int
+	select {
+	case attachmentBackendPID = <-attachmentStarted:
+	case <-ctx.Done():
+		t.Fatal("attachment transaction did not start")
+	}
+	waitForBackendBlockedBy(t, ctx, pool, attachmentBackendPID, tombstoneBackendPID, attachmentComplete)
+	close(releaseTombstone)
+	if err := <-tombstoneDone; err != nil {
+		t.Fatalf("commit tombstone transaction: %v", err)
+	}
+	attachment := <-attachmentDone
+	if !errors.Is(attachment.err, identity.ErrNotFound) || attachment.revision.RevisionID != "" || attachment.revision.ServerSequence != 0 {
+		t.Fatalf("attachment after tombstone = %#v, %v", attachment.revision, attachment.err)
+	}
+
+	var sequence int64
+	var attachmentRevisions, attachmentEvents int
+	if err := pool.QueryRow(ctx, `
+select w.next_event_sequence,
+       (select count(*) from paste_revisions r
+        where r.workspace_id = w.id and r.paste_id = $2::uuid and r.revision_kind = $3),
+       (select count(*) from workspace_events e
+        where e.workspace_id = w.id and e.object_id = $2::uuid and e.event_type = 'paste.revised')
+from workspaces w
+where w.id = $1::uuid`, workspaceID, pasteID, identity.RevisionAttachmentBundle).Scan(
+		&sequence, &attachmentRevisions, &attachmentEvents,
+	); err != nil {
+		t.Fatalf("inspect tombstone race result: %v", err)
+	}
+	if sequence != 2 || attachmentRevisions != 0 || attachmentEvents != 0 {
+		t.Fatalf("tombstone race state = sequence:%d revisions:%d events:%d", sequence, attachmentRevisions, attachmentEvents)
+	}
+}
+
+func TestPasteAggregateSnapshotKeepsCursorAndContentsAtOneBoundary(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool := testdb.New(t)
+	store := New(pool)
+	createdAt := time.Date(2026, 8, 14, 8, 45, 0, 0, time.UTC)
+	workspaceID := "00000000-0000-4000-8000-000000000978"
+	pasteID := "00000000-0000-4000-8000-000000000979"
+	firstRevisionID := "00000000-0000-4000-8000-000000000980"
+	if err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceID, createdAt); err != nil {
+			return err
+		}
+		if err := tx.InsertPaste(ctx, workspaceID, pasteID, createdAt); err != nil {
+			return err
+		}
+		_, err := tx.AppendTextRevision(
+			ctx, workspaceID, pasteID, firstRevisionID,
+			identity.RevisionContent, "paste.created", aggregateEnvelope(0x93),
+			createdAt, createdAt.AddDate(1, 0, 0),
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("seed snapshot boundary: %v", err)
+	}
+
+	type snapshotOutcome struct {
+		cursor     int64
+		aggregates []identity.PasteAggregate
+		err        error
+	}
+	snapshotStarted := make(chan int, 1)
+	cursorRead := make(chan struct{})
+	resumeSnapshot := make(chan struct{})
+	snapshotDone := make(chan snapshotOutcome, 1)
+	go func() {
+		var outcome snapshotOutcome
+		outcome.err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			var backendPID int
+			if err := tx.QueryRow(ctx, `select pg_backend_pid()`).Scan(&backendPID); err != nil {
+				return err
+			}
+			snapshotStarted <- backendPID
+			store := &txStore{tx: &pausingSnapshotTx{Tx: tx, cursorRead: cursorRead, resume: resumeSnapshot}}
+			var err error
+			outcome.cursor, outcome.aggregates, err = store.SnapshotAggregates(ctx, workspaceID, createdAt.Add(3*time.Minute))
+			return err
+		})
+		snapshotDone <- outcome
+	}()
+
+	var snapshotBackendPID int
+	select {
+	case snapshotBackendPID = <-snapshotStarted:
+	case <-ctx.Done():
+		t.Fatal("snapshot transaction did not start")
+	}
+	select {
+	case <-cursorRead:
+	case <-ctx.Done():
+		t.Fatal("snapshot did not pause after reading cursor")
+	}
+
+	type textOutcome struct {
+		revision identity.TextRevision
+		err      error
+	}
+	appendStarted := make(chan int, 1)
+	appendDone := make(chan textOutcome, 1)
+	appendComplete := make(chan struct{})
+	go func() {
+		var revision identity.TextRevision
+		err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+			postgresTx := tx.(*txStore)
+			var backendPID int
+			if err := postgresTx.tx.QueryRow(ctx, `select pg_backend_pid()`).Scan(&backendPID); err != nil {
+				return err
+			}
+			appendStarted <- backendPID
+			var err error
+			revision, err = tx.AppendTextRevision(
+				ctx, workspaceID, pasteID, "00000000-0000-4000-8000-000000000981",
+				identity.RevisionContent, "paste.revised", aggregateEnvelope(0x94),
+				createdAt.Add(time.Minute), createdAt.Add(time.Minute).AddDate(1, 0, 0),
+			)
+			return err
+		})
+		appendDone <- textOutcome{revision: revision, err: err}
+		close(appendComplete)
+	}()
+
+	var appendBackendPID int
+	select {
+	case appendBackendPID = <-appendStarted:
+	case <-ctx.Done():
+		t.Fatal("concurrent snapshot append did not start")
+	}
+	waitForBackendBlockedBy(t, ctx, pool, appendBackendPID, snapshotBackendPID, appendComplete)
+	close(resumeSnapshot)
+	snapshot := <-snapshotDone
+	if snapshot.err != nil {
+		t.Fatalf("SnapshotAggregates() error = %v", snapshot.err)
+	}
+	if snapshot.cursor != 1 || len(snapshot.aggregates) != 1 || snapshot.aggregates[0].RevisionID != firstRevisionID || snapshot.aggregates[0].ServerSequence != 1 {
+		t.Fatalf("snapshot boundary = cursor:%d aggregates:%#v", snapshot.cursor, snapshot.aggregates)
+	}
+	appendResult := <-appendDone
+	if appendResult.err != nil || appendResult.revision.ServerSequence != 2 {
+		t.Fatalf("append after snapshot = %#v, %v", appendResult.revision, appendResult.err)
+	}
+}
+
+func TestSyncStreamsUnexpiredAttachmentKindsAndOmitsExpiredImageComponents(t *testing.T) {
+	ctx := context.Background()
+	store := New(testdb.New(t))
+	now := time.Date(2026, 8, 14, 9, 0, 0, 0, time.UTC)
+	workspaceID := "00000000-0000-4000-8000-000000000981"
+
+	var result identity.SyncResult
+	err := store.WithinTx(ctx, func(tx identity.TxStore) error {
+		if err := tx.InsertWorkspace(ctx, workspaceID, now.Add(-time.Hour)); err != nil {
+			return err
+		}
+		textPasteID := "00000000-0000-4000-8000-000000000982"
+		if err := tx.InsertPaste(ctx, workspaceID, textPasteID, now.Add(-time.Hour)); err != nil {
+			return err
+		}
+		if _, err := tx.AppendTextRevision(
+			ctx, workspaceID, textPasteID, "00000000-0000-4000-8000-000000000983",
+			identity.RevisionContent, "paste.created", aggregateEnvelope(0xa1),
+			now.Add(-time.Hour), now.Add(-time.Hour).AddDate(1, 0, 0),
+		); err != nil {
+			return err
+		}
+		attachmentAt := now.Add(-30 * time.Minute)
+		if _, err := tx.AppendAttachmentRevision(
+			ctx, workspaceID, textPasteID, "00000000-0000-4000-8000-000000000984", "paste.revised",
+			[]identity.ImageAsset{aggregateAsset(0, "sync/attachment", attachmentAt.Add(identity.ImageLifetime))},
+			attachmentAt, attachmentAt.Add(identity.ImageLifetime),
+		); err != nil {
+			return err
+		}
+
+		legacyPasteID := "00000000-0000-4000-8000-000000000985"
+		if err := tx.InsertPaste(ctx, workspaceID, legacyPasteID, attachmentAt); err != nil {
+			return err
+		}
+		if _, err := tx.AppendImageRevision(
+			ctx, workspaceID, legacyPasteID, "00000000-0000-4000-8000-000000000986", "paste.created",
+			[]identity.ImageAsset{aggregateAsset(0, "sync/legacy", attachmentAt.Add(identity.ImageLifetime))},
+			attachmentAt, attachmentAt.Add(identity.ImageLifetime),
+		); err != nil {
+			return err
+		}
+
+		expiredAt := now.Add(-25 * time.Hour)
+		expiredAttachmentPasteID := "00000000-0000-4000-8000-000000000987"
+		if err := tx.InsertPaste(ctx, workspaceID, expiredAttachmentPasteID, expiredAt); err != nil {
+			return err
+		}
+		if _, err := tx.AppendTextRevision(
+			ctx, workspaceID, expiredAttachmentPasteID, "00000000-0000-4000-8000-000000000991",
+			identity.RevisionContent, "paste.created", aggregateEnvelope(0xa2),
+			expiredAt, expiredAt.AddDate(1, 0, 0),
+		); err != nil {
+			return err
+		}
+		if _, err := tx.AppendAttachmentRevision(
+			ctx, workspaceID, expiredAttachmentPasteID, "00000000-0000-4000-8000-000000000988", "paste.revised", nil,
+			expiredAt, expiredAt.Add(identity.ImageLifetime),
+		); err != nil {
+			return err
+		}
+
+		expiredLegacyPasteID := "00000000-0000-4000-8000-000000000989"
+		if err := tx.InsertPaste(ctx, workspaceID, expiredLegacyPasteID, expiredAt); err != nil {
+			return err
+		}
+		if _, err := tx.AppendImageRevision(
+			ctx, workspaceID, expiredLegacyPasteID, "00000000-0000-4000-8000-000000000990", "paste.created",
+			[]identity.ImageAsset{aggregateAsset(0, "sync/expired-legacy", expiredAt.Add(identity.ImageLifetime))},
+			expiredAt, expiredAt.Add(identity.ImageLifetime),
+		); err != nil {
+			return err
+		}
+
+		var err error
+		result, err = tx.Sync(ctx, workspaceID, 1, 10, now)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("sync attachment transaction: %v", err)
+	}
+	if result.Cursor != 6 || result.HasMore || len(result.Events) != 3 {
+		t.Fatalf("attachment sync result = %#v", result)
+	}
+	if result.Events[0].Sequence != 2 || result.Events[0].RevisionKind != identity.RevisionAttachmentBundle ||
+		result.Events[1].Sequence != 3 || result.Events[1].RevisionKind != identity.RevisionImageBundle ||
+		result.Events[2].Sequence != 4 || result.Events[2].RevisionKind != identity.RevisionContent {
+		t.Fatalf("attachment sync events = %#v", result.Events)
+	}
+}
 
 func TestWorkspaceScopedCredentialAuthentication(t *testing.T) {
 	ctx := context.Background()
@@ -149,6 +1025,36 @@ select exists(
 		select {
 		case <-ctx.Done():
 			t.Fatal("authentication update did not block on credential row")
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForBackendBlockedBy(t *testing.T, ctx context.Context, pool *pgxpool.Pool, waitingBackendPID, blockingBackendPID int, completed <-chan struct{}) {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `
+select exists(
+    select 1
+    from pg_stat_activity waiting_transaction
+    where waiting_transaction.datname = current_database()
+      and waiting_transaction.pid = $1
+      and waiting_transaction.wait_event_type = 'Lock'
+      and $2::integer = any(pg_blocking_pids(waiting_transaction.pid))
+)`, waitingBackendPID, blockingBackendPID).Scan(&waiting); err != nil {
+			t.Fatalf("inspect blocked transaction: %v", err)
+		}
+		if waiting {
+			return
+		}
+		select {
+		case <-completed:
+			t.Fatal("transaction completed before acquiring the expected workspace lock")
+		case <-ctx.Done():
+			t.Fatal("transaction did not block on the expected workspace lock")
 		case <-ticker.C:
 		}
 	}
@@ -648,6 +1554,208 @@ func TestCleanupPurgesExpiredMetadata(t *testing.T) {
 	}
 }
 
+func TestPurgeImagesRemovesExpiredEmptyAttachmentRevision(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	pasteID := "00000000-0000-4000-8101-000000000001"
+	textRevisionID := "00000000-0000-4000-8102-000000000001"
+	attachmentRevisionID := "00000000-0000-4000-8102-000000000002"
+
+	if _, err := pool.Exec(ctx, `
+insert into workspaces(id, created_at)
+values ($1::uuid, $2)`, workspaceOne, now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("seed attachment workspace: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into pastes(id, workspace_id, paste_kind, created_at)
+values ($1::uuid, $2::uuid, 'text', $3)`, pasteID, workspaceOne, now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("seed attachment paste: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into paste_revisions(
+    id, workspace_id, paste_id, server_sequence, revision_kind,
+    text_key_id, text_nonce, text_ciphertext, created_at, expires_at
+)
+values
+    ($1::uuid, $2::uuid, $3::uuid, 1, 'content',
+     'test-key', decode(repeat('ab', 12), 'hex'), decode('01', 'hex'), $4, $4::timestamptz + interval '1 year'),
+    ($5::uuid, $2::uuid, $3::uuid, 2, 'attachment_bundle',
+     null, null, null, $6, $6::timestamptz + interval '24 hours')`,
+		textRevisionID, workspaceOne, pasteID, now, attachmentRevisionID, now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("seed text and empty attachment revisions: %v", err)
+	}
+
+	expired, err := store.ListExpiredImageRevisions(ctx, now, 100)
+	if err != nil {
+		t.Fatalf("ListExpiredImageRevisions() error = %v", err)
+	}
+	revisions, assets, err := store.PurgeImageRevisions(ctx, now, expired)
+	if err != nil {
+		t.Fatalf("PurgeImageRevisions() error = %v", err)
+	}
+	if revisions != 1 || assets != 0 {
+		t.Fatalf("purge counts = %d/%d, want 1/0", revisions, assets)
+	}
+
+	var pasteRows, textRows, attachmentRows int
+	if err := pool.QueryRow(ctx, `
+select (select count(*) from pastes where workspace_id = $1::uuid and id = $2::uuid),
+       (select count(*) from paste_revisions where workspace_id = $1::uuid and id = $3::uuid),
+       (select count(*) from paste_revisions where workspace_id = $1::uuid and id = $4::uuid)`,
+		workspaceOne, pasteID, textRevisionID, attachmentRevisionID).Scan(&pasteRows, &textRows, &attachmentRows); err != nil {
+		t.Fatalf("inspect empty attachment purge: %v", err)
+	}
+	if pasteRows != 1 || textRows != 1 || attachmentRows != 0 {
+		t.Fatalf("remaining rows = paste:%d text:%d attachment:%d, want 1/1/0", pasteRows, textRows, attachmentRows)
+	}
+}
+
+func TestPurgeImageRevisionsCountsAllSelectedAssetsInIndexOrder(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	pasteID := "00000000-0000-4000-8111-000000000001"
+	textRevisionID := "00000000-0000-4000-8112-000000000001"
+	attachmentRevisionID := "00000000-0000-4000-8112-000000000002"
+
+	if _, err := pool.Exec(ctx, `
+insert into workspaces(id, created_at)
+values ($1::uuid, $2)`, workspaceOne, now.Add(-72*time.Hour)); err != nil {
+		t.Fatalf("seed multi-asset workspace: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into pastes(id, workspace_id, paste_kind, created_at)
+values ($1::uuid, $2::uuid, 'text', $3)`, pasteID, workspaceOne, now.Add(-72*time.Hour)); err != nil {
+		t.Fatalf("seed multi-asset paste: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into paste_revisions(
+    id, workspace_id, paste_id, server_sequence, revision_kind,
+    text_key_id, text_nonce, text_ciphertext, created_at, expires_at
+)
+values
+    ($1::uuid, $2::uuid, $3::uuid, 1, 'content',
+     'test-key', decode(repeat('ab', 12), 'hex'), decode('01', 'hex'), $4, $4::timestamptz + interval '1 year'),
+    ($5::uuid, $2::uuid, $3::uuid, 2, 'attachment_bundle',
+     null, null, null, $6, $6::timestamptz + interval '24 hours')`,
+		textRevisionID, workspaceOne, pasteID, now.Add(-72*time.Hour), attachmentRevisionID, now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("seed multi-asset revisions: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into paste_assets(
+    workspace_id, paste_id, revision_id, asset_index, mime_type, width, height,
+    byte_size, storage_key, image_key_id, image_nonce, created_at, expires_at
+)
+values
+    ($1::uuid, $2::uuid, $3::uuid, 2, 'image/png', 3, 3, 3,
+     'cleanup/multi/2', 'test-key', decode(repeat('a2', 12), 'hex'), $4, $4::timestamptz + interval '24 hours'),
+    ($1::uuid, $2::uuid, $3::uuid, 0, 'image/png', 1, 1, 1,
+     'cleanup/multi/0', 'test-key', decode(repeat('a0', 12), 'hex'), $5, $5::timestamptz + interval '24 hours'),
+    ($1::uuid, $2::uuid, $3::uuid, 1, 'image/png', 2, 2, 2,
+     'cleanup/multi/1', 'test-key', decode(repeat('a1', 12), 'hex'), $6, $6::timestamptz + interval '24 hours')`,
+		workspaceOne, pasteID, attachmentRevisionID,
+		now.Add(-36*time.Hour), now.Add(-48*time.Hour), now.Add(-12*time.Hour)); err != nil {
+		t.Fatalf("seed out-of-order multi-asset rows: %v", err)
+	}
+
+	expired, err := store.ListExpiredImageRevisions(ctx, now, 100)
+	if err != nil {
+		t.Fatalf("ListExpiredImageRevisions() error = %v", err)
+	}
+	if len(expired) != 1 || expired[0].WorkspaceID != workspaceOne || expired[0].PasteID != pasteID || expired[0].RevisionID != attachmentRevisionID {
+		t.Fatalf("expired revisions = %#v", expired)
+	}
+	if len(expired[0].Assets) != 3 || expired[0].Assets[0].AssetIndex != 0 || expired[0].Assets[1].AssetIndex != 1 || expired[0].Assets[2].AssetIndex != 2 {
+		t.Fatalf("ordered assets = %#v", expired[0].Assets)
+	}
+
+	revisions, assets, err := store.PurgeImageRevisions(ctx, now, expired)
+	if err != nil {
+		t.Fatalf("PurgeImageRevisions() error = %v", err)
+	}
+	if revisions != 1 || assets != 3 {
+		t.Fatalf("purge counts = %d/%d, want 1/3", revisions, assets)
+	}
+
+	var pasteRows, textRows, attachmentRows, assetRows int
+	if err := pool.QueryRow(ctx, `
+select (select count(*) from pastes where workspace_id = $1::uuid and id = $2::uuid),
+       (select count(*) from paste_revisions where workspace_id = $1::uuid and id = $3::uuid),
+       (select count(*) from paste_revisions where workspace_id = $1::uuid and id = $4::uuid),
+       (select count(*) from paste_assets where workspace_id = $1::uuid and revision_id = $4::uuid)`,
+		workspaceOne, pasteID, textRevisionID, attachmentRevisionID).Scan(&pasteRows, &textRows, &attachmentRows, &assetRows); err != nil {
+		t.Fatalf("inspect multi-asset purge: %v", err)
+	}
+	if pasteRows != 1 || textRows != 1 || attachmentRows != 0 || assetRows != 0 {
+		t.Fatalf("remaining rows = paste:%d text:%d attachment:%d assets:%d, want 1/1/0/0", pasteRows, textRows, attachmentRows, assetRows)
+	}
+}
+
+func TestPurgeImageRevisionsRemovesSelectedLegacyOrphanPasteInSameCycle(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	store := New(pool)
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	pasteID := "00000000-0000-4000-8121-000000000001"
+	revisionID := "00000000-0000-4000-8122-000000000001"
+
+	if _, err := pool.Exec(ctx, `
+insert into workspaces(id, created_at)
+values ($1::uuid, $2)`, workspaceOne, now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("seed legacy orphan workspace: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into pastes(id, workspace_id, paste_kind, created_at)
+values ($1::uuid, $2::uuid, 'image_bundle', $3)`, pasteID, workspaceOne, now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("seed legacy orphan paste: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into paste_revisions(
+    id, workspace_id, paste_id, server_sequence, revision_kind, created_at, expires_at
+)
+values ($1::uuid, $2::uuid, $3::uuid, 1, 'image_bundle', $4, $4::timestamptz + interval '24 hours')`,
+		revisionID, workspaceOne, pasteID, now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("seed legacy orphan revision: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+insert into paste_assets(
+    workspace_id, paste_id, revision_id, asset_index, mime_type, width, height,
+    byte_size, storage_key, image_key_id, image_nonce, created_at, expires_at
+)
+values ($1::uuid, $2::uuid, $3::uuid, 0, 'image/png', 1, 1, 1,
+        'cleanup/orphan/0', 'test-key', decode(repeat('ab', 12), 'hex'), $4, $4::timestamptz + interval '24 hours')`,
+		workspaceOne, pasteID, revisionID, now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("seed legacy orphan asset: %v", err)
+	}
+
+	expired, err := store.ListExpiredImageRevisions(ctx, now, 100)
+	if err != nil {
+		t.Fatalf("ListExpiredImageRevisions() error = %v", err)
+	}
+	revisions, assets, err := store.PurgeImageRevisions(ctx, now, expired)
+	if err != nil {
+		t.Fatalf("PurgeImageRevisions() error = %v", err)
+	}
+	if revisions != 1 || assets != 1 {
+		t.Fatalf("purge counts = %d/%d, want 1/1", revisions, assets)
+	}
+
+	var pasteRows, revisionRows, assetRows int
+	if err := pool.QueryRow(ctx, `
+select (select count(*) from pastes where workspace_id = $1::uuid and id = $2::uuid),
+       (select count(*) from paste_revisions where workspace_id = $1::uuid and id = $3::uuid),
+       (select count(*) from paste_assets where workspace_id = $1::uuid and revision_id = $3::uuid)`,
+		workspaceOne, pasteID, revisionID).Scan(&pasteRows, &revisionRows, &assetRows); err != nil {
+		t.Fatalf("inspect legacy orphan purge: %v", err)
+	}
+	if pasteRows != 0 || revisionRows != 0 || assetRows != 0 {
+		t.Fatalf("remaining rows = paste:%d revision:%d assets:%d, want 0/0/0", pasteRows, revisionRows, assetRows)
+	}
+}
+
 func TestPurgeImagesBoundsFilesystemSelectionAndDatabaseDeletion(t *testing.T) {
 	ctx := context.Background()
 	pool := testdb.New(t)
@@ -691,19 +1799,19 @@ from generate_series(1, 101) as rows(n)`, workspaceOne, now); err != nil {
 		t.Fatalf("seed image assets: %v", err)
 	}
 
-	expired, err := store.ListExpiredImages(ctx, now, 100)
+	expired, err := store.ListExpiredImageRevisions(ctx, now, 100)
 	if err != nil {
-		t.Fatalf("ListExpiredImages() error = %v", err)
+		t.Fatalf("ListExpiredImageRevisions() error = %v", err)
 	}
 	if len(expired) != 100 {
-		t.Fatalf("ListExpiredImages() count = %d, want 100", len(expired))
+		t.Fatalf("ListExpiredImageRevisions() count = %d, want 100", len(expired))
 	}
-	revisions, assets, err := store.PurgeImages(ctx, now, expired)
+	revisions, assets, err := store.PurgeImageRevisions(ctx, now, expired)
 	if err != nil {
-		t.Fatalf("PurgeImages() error = %v", err)
+		t.Fatalf("PurgeImageRevisions() error = %v", err)
 	}
 	if revisions != 100 || assets != 100 {
-		t.Fatalf("PurgeImages() counts = %d/%d, want 100/100", revisions, assets)
+		t.Fatalf("PurgeImageRevisions() counts = %d/%d, want 100/100", revisions, assets)
 	}
 	var remainingRevisions, remainingAssets int
 	if err := pool.QueryRow(ctx, `
@@ -895,7 +2003,7 @@ where workspace_id = $1::uuid and id = $2::uuid`, workspaceOne, pairingID).Scan(
 		if _, err := store.Authenticate(ctx, workspaceOne, credentialLocator, credentialHash, cleanupAt); err != nil {
 			t.Fatalf("claim-won credential authentication: %v", err)
 		}
-	case errors.Is(claimErr, identity.ErrPairingExpired):
+	case errors.Is(claimErr, identity.ErrPairingDenied):
 		if cleanup.result.RevokedDevices != 1 || claimedAt != nil || invalidatedAt == nil {
 			t.Fatalf("cleanup-won state: revoked=%d claimed=%v invalidated=%v", cleanup.result.RevokedDevices, claimedAt != nil, invalidatedAt != nil)
 		}
@@ -999,7 +2107,7 @@ where p.workspace_id = $1::uuid and p.id = $2::uuid`, workspaceOne, pairingID).S
 		_, err := tx.LockPairingForClaim(ctx, pairingID, claimHash, cleanupAt)
 		return err
 	})
-	if !errors.Is(err, identity.ErrPairingExpired) {
+	if !errors.Is(err, identity.ErrPairingDenied) {
 		t.Fatalf("claim after cleanup error = %v", err)
 	}
 }
@@ -1097,7 +2205,7 @@ where p.workspace_id = $1::uuid and p.id = $2::uuid`, workspaceOne, pairingID).S
 		_, err := tx.LockPairingForClaim(ctx, pairingID, claimHash, cleanupAt)
 		return err
 	})
-	if !errors.Is(err, identity.ErrPairingExpired) {
+	if !errors.Is(err, identity.ErrPairingDenied) {
 		t.Fatalf("claim after cleanup error = %v", err)
 	}
 }

@@ -220,6 +220,54 @@ func (s *Service) PairingByShortCode(ctx context.Context, principal Principal, s
 	return details(pairing), err
 }
 
+func (s *Service) PairingStatus(ctx context.Context, clientIP, pairingID, claimSecret string) (PairingStatusResponse, error) {
+	if !secure.ValidUUID(pairingID) {
+		return PairingStatusResponse{}, ErrInvalid
+	}
+	if err := s.limit(ctx, RateRule{Scope: "pairing.status.ip", Limit: 60, Window: 10 * time.Minute}, "ip:"+clientIP); err != nil {
+		return PairingStatusResponse{}, err
+	}
+	if err := s.limit(ctx, RateRule{Scope: "pairing.status.id", Limit: 60, Window: 10 * time.Minute}, pairingID); err != nil {
+		return PairingStatusResponse{}, err
+	}
+	claimHash, err := secure.HashClaimSecret(claimSecret)
+	if err != nil {
+		return PairingStatusResponse{}, ErrInvalidClaim
+	}
+	now := s.clock.Now()
+	var pairing Pairing
+	err = s.store.WithinTx(ctx, func(tx TxStore) error {
+		var readErr error
+		pairing, readErr = tx.GetPairingForStatus(ctx, pairingID, claimHash, now)
+		return readErr
+	})
+	if err != nil {
+		return PairingStatusResponse{}, err
+	}
+
+	response := PairingStatusResponse{
+		PairingID: pairing.ID,
+		ExpiresAt: wireTime(pairing.ExpiresAt),
+	}
+	if pairing.WorkspaceID != "" {
+		claimExpiresAt := wireTime(pairing.ClaimExpiresAt)
+		response.ClaimExpiresAt = &claimExpiresAt
+	}
+	switch {
+	case !pairing.ClaimInvalidatedAt.IsZero():
+		response.Status = "denied"
+	case pairing.WorkspaceID == "" && !pairing.ExpiresAt.After(now):
+		response.Status = "expired"
+	case pairing.WorkspaceID != "" && !pairing.ClaimExpiresAt.After(now):
+		response.Status = "expired"
+	case pairing.WorkspaceID != "":
+		response.Status = "approved"
+	default:
+		response.Status = "pending"
+	}
+	return response, nil
+}
+
 func (s *Service) ApprovePairing(ctx context.Context, principal Principal, pairingID, idempotencyKey string) (Result, error) {
 	if principal.Scope != "full" {
 		return Result{}, ErrForbidden
@@ -272,6 +320,34 @@ func (s *Service) ApprovePairing(ctx context.Context, principal Principal, pairi
 			return nil, "", err
 		}
 		return ApprovalResponse{PairingID: pairingID, Status: "approved", ClaimExpiresAt: wireTime(claimExpiresAt)}, principal.WorkspaceID, nil
+	})
+}
+
+func (s *Service) DenyPairing(ctx context.Context, principal Principal, pairingID, idempotencyKey string) (Result, error) {
+	if principal.Scope != "full" {
+		return Result{}, ErrForbidden
+	}
+	if !secure.ValidUUID(pairingID) {
+		return Result{}, ErrInvalid
+	}
+	canonical := []byte("{}")
+	operation := "pairing.deny:" + pairingID
+	if replay, found, err := s.preflight(ctx, principal.WorkspaceID, operation, idempotencyKey, principal.WorkspaceID, canonical); err != nil || found {
+		return replay, err
+	}
+	return s.mutate(ctx, principal.WorkspaceID, operation, idempotencyKey, principal.WorkspaceID, canonical, 200, func(tx TxStore, now time.Time) (any, string, error) {
+		pairing, err := tx.LockPairingForDenial(ctx, principal.WorkspaceID, pairingID, now)
+		if err != nil {
+			return nil, "", err
+		}
+		if err := tx.InvalidatePendingPairing(ctx, pairingID, now); err != nil {
+			return nil, "", err
+		}
+		return PairingStatusResponse{
+			PairingID: pairing.ID,
+			Status:    "denied",
+			ExpiresAt: wireTime(pairing.ExpiresAt),
+		}, principal.WorkspaceID, nil
 	})
 }
 
@@ -453,32 +529,27 @@ func (s *Service) Recover(ctx context.Context, clientIP, idempotencyKey string, 
 }
 
 func (s *Service) Cleanup(ctx context.Context) (CleanupResult, error) {
-	result, err := s.store.Cleanup(ctx, s.clock.Now())
+	now := s.clock.Now()
+	result, err := s.store.Cleanup(ctx, now)
 	if err != nil {
 		return result, err
 	}
-	result.TextRevisionRows, result.TextPasteRows, err = s.store.PurgeText(ctx, s.clock.Now())
+	result.TextRevisionRows, result.TextPasteRows, err = s.store.PurgeText(ctx, now)
 	if err != nil {
 		return result, err
 	}
-	expiredImages, err := s.store.ListExpiredImages(ctx, s.clock.Now(), 100)
+	expiredRevisions, err := s.store.ListExpiredImageRevisions(ctx, now, 100)
 	if err != nil {
 		return result, err
 	}
 	if s.imageStore != nil {
-		seen := make(map[string]struct{})
-		for _, asset := range expiredImages {
-			key := asset.WorkspaceID + ":" + asset.PasteID + ":" + asset.RevisionID
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			if err := s.imageStore.RemoveTree(asset.WorkspaceID, asset.PasteID, asset.RevisionID); err != nil {
+		for _, revision := range expiredRevisions {
+			if err := s.imageStore.RemoveTree(revision.WorkspaceID, revision.PasteID, revision.RevisionID); err != nil {
 				return result, err
 			}
-			seen[key] = struct{}{}
 		}
 	}
-	result.ImageRevisionRows, result.ImageAssetRows, err = s.store.PurgeImages(ctx, s.clock.Now(), expiredImages)
+	result.ImageRevisionRows, result.ImageAssetRows, err = s.store.PurgeImageRevisions(ctx, now, expiredRevisions)
 	return result, err
 }
 

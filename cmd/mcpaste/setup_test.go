@@ -36,10 +36,7 @@ func TestSetupSavesConnectorAndConfiguresClientsWithoutTokenInConfig(t *testing.
 	credentialPath := filepath.Join(directory, "credential.json")
 	codexPath := filepath.Join(directory, "codex.toml")
 	claudePath := filepath.Join(directory, "claude.json")
-	if err := runSetup(context.Background(), []string{
-		"--endpoint", server.URL, "--name", "test-companion", "--credential-file", credentialPath,
-		"--codex-config", codexPath, "--claude-config", claudePath,
-	}); err != nil {
+	if err := runSetupWithEndpoint(context.Background(), server.URL+"/v1/mcp", "test-companion", credentialPath, codexPath, claudePath); err != nil {
 		t.Fatalf("runSetup() error = %v", err)
 	}
 	credential, err := connector.LoadCredential(credentialPath)
@@ -51,8 +48,8 @@ func TestSetupSavesConnectorAndConfiguresClientsWithoutTokenInConfig(t *testing.
 		if err != nil {
 			t.Fatalf("read configured client %s: %v", path, err)
 		}
-		if strings.Contains(string(data), token) || !strings.Contains(string(data), "--endpoint") {
-			t.Fatalf("client config contains credential or lacks endpoint: %s", data)
+		if strings.Contains(string(data), token) || strings.Contains(string(data), "--endpoint") {
+			t.Fatalf("client config contains credential or endpoint override: %s", data)
 		}
 	}
 }

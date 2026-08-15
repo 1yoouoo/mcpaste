@@ -149,8 +149,17 @@ Phase 2 exposes anonymous workspace, pairing, recovery, and full-device administ
 
 Phase 3 exposes text synchronization under the same versioned API. Full credentials may create, revise, tombstone, list, and sync text pastes; connector credentials are rejected on every write and sync route. `GET /v1/sync?after=<sequence>&limit=<n>` returns ordered durable events and a cursor, while `GET /v1/events?after=<sequence>` sends metadata-only SSE invalidations. Clients should poll `/v1/sync` every 15 seconds when SSE is unavailable. Text bodies are preserved exactly, encrypted at rest, retained for one year, and removed by the cleanup worker after expiry.
 
-The read-only MCP endpoint exposes only `get_latest_paste`. Run `mcpaste setup --endpoint https://host --name linux-companion` after an administrator approves the printed pairing request; setup stores the connector credential in `$XDG_CONFIG_HOME/mcpaste/credential.json` (or `~/.config/mcpaste/credential.json`) and updates detected Codex and Claude Code configurations without placing the token in either file. With no arguments, `mcpaste` runs the read-only STDIO proxy. The connector never exposes write APIs or paste bodies in logs.
+The read-only MCP endpoint exposes only `get_latest_paste`. Run `mcpaste setup --name linux-companion` after an administrator approves the printed pairing request; the service endpoint is selected at build time through `MCPASTE_ENDPOINT`, setup stores the connector credential in `$XDG_CONFIG_HOME/mcpaste/credential.json` (or `~/.config/mcpaste/credential.json`), and detected Codex and Claude Code configurations contain no endpoint override or token. With no arguments, `mcpaste` runs the read-only STDIO proxy. The connector never exposes write APIs or paste bodies in logs.
+
+For a local contributor build, configure the official service endpoint without placing it in application source:
+
+```sh
+export MCPASTE_ENDPOINT='https://<official-service-host>'
+./scripts/configure-endpoint.sh
+(cd macos/MCPaste && swift test && swift build -c release)
+go build -ldflags "-X=github.com/1yoouoo/mcpaste/internal/connector.BuildEndpoint=$MCPASTE_ENDPOINT" ./cmd/mcpaste
+```
 
 Never use real secrets in environment files, fixtures, logs, screenshots, issues, or pull requests. Use visibly fake deterministic examples such as `example-token-not-real`.
 
-Read the [approved system design](docs/superpowers/specs/2026-08-12-mcpaste-system-design.md) and [implementation roadmap](docs/superpowers/plans/2026-08-12-mcpaste-roadmap.md) for the current direction.
+Public operational details are in [Operations](docs/operations.md), [Releases](docs/releases.md), and [Security and secrets](docs/security-and-secrets.md).

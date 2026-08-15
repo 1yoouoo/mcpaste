@@ -15,4 +15,17 @@ final class ImageNormalizerTests: XCTestCase {
     func testOversizedSourceIsRejectedBeforeDecode() {
         XCTAssertThrowsError(try ImageNormalizer().normalize(Data(repeating: 1, count: ImageNormalizer.maxSourceBytes + 1)))
     }
+
+    func testAttachmentCountIsEight() {
+        XCTAssertEqual(ImageNormalizer.maxAttachmentItems, 8)
+        XCTAssertNoThrow(try ImageNormalizer.validateAttachmentCount(0))
+        XCTAssertNoThrow(try ImageNormalizer.validateAttachmentCount(8))
+        for count in [-1, 9, Int.max] {
+            XCTAssertThrowsError(try ImageNormalizer.validateAttachmentCount(count)) { error in
+                guard case ImageNormalizationError.tooLarge = error else {
+                    return XCTFail("Unexpected attachment count error: \(error)")
+                }
+            }
+        }
+    }
 }

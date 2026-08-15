@@ -39,7 +39,6 @@ func run(ctx context.Context, args []string) error {
 func runProxy(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("mcpaste", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	endpoint := flags.String("endpoint", "", "MCP endpoint")
 	credentialPath := flags.String("credential-file", "", "credential file")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return errors.New("invalid proxy arguments")
@@ -56,8 +55,8 @@ func runProxy(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if *endpoint != "" {
-		credential.Endpoint = normalizeMCPEndpoint(*endpoint)
+	if err := connector.ValidateConfiguredEndpoint(credential.Endpoint); err != nil {
+		return err
 	}
 	proxy, err := connector.NewProxy(ctx, credential, http.DefaultClient)
 	if err != nil {
@@ -70,16 +69,21 @@ func runProxy(ctx context.Context, args []string) error {
 func runSetup(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("mcpaste setup", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	endpoint := flags.String("endpoint", "", "MCPaste service endpoint")
 	name := flags.String("name", "linux-companion", "device display name")
 	credentialPath := flags.String("credential-file", "", "credential file")
 	codexPath := flags.String("codex-config", "", "Codex configuration path")
 	claudePath := flags.String("claude-config", "", "Claude Code configuration path")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *endpoint == "" || *name == "" {
-		return errors.New("setup requires --endpoint and a non-empty --name")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *name == "" {
+		return errors.New("invalid setup arguments")
 	}
-	apiEndpoint := strings.TrimRight(*endpoint, "/")
-	mcpEndpoint := normalizeMCPEndpoint(apiEndpoint)
+	mcpEndpoint, err := connector.ConfiguredMCPEndpoint()
+	if err != nil {
+		return err
+	}
+	return runSetupWithEndpoint(ctx, mcpEndpoint, *name, *credentialPath, *codexPath, *claudePath)
+}
+
+func runSetupWithEndpoint(ctx context.Context, mcpEndpoint, name, credentialPath, codexPath, claudePath string) error {
 	if err := connector.ValidateEndpoint(mcpEndpoint); err != nil {
 		return err
 	}
@@ -91,7 +95,7 @@ func runSetup(ctx context.Context, args []string) error {
 	if err != nil {
 		return errors.New("create pairing request")
 	}
-	input, err := json.Marshal(map[string]string{"proposed_name": *name, "platform": "linux", "requested_scope": "connector"})
+	input, err := json.Marshal(map[string]string{"proposed_name": name, "platform": "linux", "requested_scope": "connector"})
 	if err != nil {
 		return errors.New("create pairing request")
 	}
@@ -129,7 +133,7 @@ func runSetup(ctx context.Context, args []string) error {
 	if token == "" {
 		return errors.New("pairing response has no connector credential")
 	}
-	path := *credentialPath
+	path := credentialPath
 	if path == "" {
 		path, err = connector.DefaultCredentialPath()
 		if err != nil {
@@ -144,7 +148,7 @@ func runSetup(ctx context.Context, args []string) error {
 		return errors.New("resolve mcpaste executable")
 	}
 	if err := connector.ConfigureClients(connector.ClientConfigOptions{
-		CommandPath: commandPath, Endpoint: mcpEndpoint, CodexPath: *codexPath, ClaudePath: *claudePath,
+		CommandPath: commandPath, CodexPath: codexPath, ClaudePath: claudePath,
 	}); err != nil {
 		return err
 	}
@@ -198,12 +202,4 @@ func claimPairing(ctx context.Context, apiBase string, pairing identity.PairingC
 		case <-ticker.C:
 		}
 	}
-}
-
-func normalizeMCPEndpoint(endpoint string) string {
-	endpoint = strings.TrimRight(endpoint, "/")
-	if strings.HasSuffix(endpoint, "/v1/mcp") {
-		return endpoint
-	}
-	return endpoint + "/v1/mcp"
 }

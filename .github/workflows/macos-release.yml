@@ -22,6 +22,8 @@ jobs:
     runs-on: macos-14
     environment: release
     timeout-minutes: 35
+    env:
+      MCPASTE_ENDPOINT: ${{ vars.MCPASTE_ENDPOINT }}
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -32,7 +34,9 @@ jobs:
         run: sudo xcode-select --switch /Applications/Xcode_15.4.app
       - name: Test package
         working-directory: macos/MCPaste
-        run: swift test
+        run: |
+          ../../scripts/configure-endpoint.sh
+          swift test
       - name: Import signing certificate
         env:
           SIGNING_CERTIFICATE_BASE64: ${{ secrets.MACOS_SIGNING_CERTIFICATE_BASE64 }}
@@ -56,7 +60,9 @@ jobs:
           swift build -c release --product MCPaste
           app="$RUNNER_TEMP/MCPaste.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp "$(swift build -c release --show-bin-path)/MCPaste" "$app/Contents/MacOS/MCPaste"
+          bin_path="$(swift build -c release --show-bin-path)"
+          cp "$bin_path/MCPaste" "$app/Contents/MacOS/MCPaste"
+          cp -R "$bin_path/MCPaste_MCPasteApp.bundle" "$app/Contents/Resources/"
           cp Resources/Info.plist "$app/Contents/Info.plist"
           codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app"
           ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/MCPaste.zip"

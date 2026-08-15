@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	MaxSourceBytes = 250 << 20
-	MaxBundleItems = 20
-	MaxBundleBytes = 32 << 20
-	MaxDimension   = 100_000
+	MaxSourceBytes     = 250 << 20
+	MaxBundleItems     = 20
+	MaxAttachmentItems = 8
+	MaxBundleBytes     = 32 << 20
+	MaxDimension       = 100_000
 )
 
 var ErrInvalidImage = errors.New("invalid image bundle")
@@ -30,6 +31,17 @@ func ValidateBundle(items []AssetInput) error {
 	if len(items) == 0 || len(items) > MaxBundleItems {
 		return ErrInvalidImage
 	}
+	return validateBundleItems(items)
+}
+
+func ValidateAttachmentBundle(items []AssetInput) error {
+	if len(items) > MaxAttachmentItems {
+		return ErrInvalidImage
+	}
+	return validateBundleItems(items)
+}
+
+func validateBundleItems(items []AssetInput) error {
 	var totalBytes int
 	for _, item := range items {
 		if !supportedMIME(item.MIMEType) || item.Width < 1 || item.Height < 1 || item.Width > MaxDimension || item.Height > MaxDimension || len(item.Bytes) == 0 || len(item.Bytes) > MaxSourceBytes || !validImageBytes(item) {

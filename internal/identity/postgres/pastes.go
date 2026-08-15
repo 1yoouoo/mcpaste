@@ -1,11 +1,13 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"time"
 
 	"github.com/1yoouoo/mcpaste/internal/identity"
+	"github.com/1yoouoo/mcpaste/internal/images"
 	"github.com/1yoouoo/mcpaste/internal/secure"
 	"github.com/jackc/pgx/v5"
 )
@@ -53,6 +55,17 @@ where workspace_id = $1::uuid
 }
 
 func (s *txStore) AppendTextRevision(ctx context.Context, workspaceID, pasteID, revisionID, kind, eventType string, envelope secure.Envelope, createdAt, expiresAt time.Time) (identity.TextRevision, error) {
+	var lockedWorkspaceID string
+	lockErr := s.tx.QueryRow(ctx, `
+select id::text from workspaces
+where id = $1::uuid
+for update`, workspaceID).Scan(&lockedWorkspaceID)
+	if errors.Is(lockErr, pgx.ErrNoRows) {
+		return identity.TextRevision{}, identity.ErrNotFound
+	}
+	if lockErr != nil {
+		return identity.TextRevision{}, lockErr
+	}
 	var exists bool
 	var pasteKind string
 	if err := s.tx.QueryRow(ctx, `
@@ -64,6 +77,14 @@ func (s *txStore) AppendTextRevision(ctx context.Context, workspaceID, pasteID, 
 	}
 	if kind == "content" && pasteKind == "image_bundle" {
 		return identity.TextRevision{}, identity.ErrInvalid
+	}
+	var latestKind string
+	latestErr := s.tx.QueryRow(ctx, `select revision_kind from paste_revisions where workspace_id=$1::uuid and paste_id=$2::uuid order by server_sequence desc limit 1`, workspaceID, pasteID).Scan(&latestKind)
+	if latestErr != nil && !errors.Is(latestErr, pgx.ErrNoRows) {
+		return identity.TextRevision{}, latestErr
+	}
+	if latestErr == nil && latestKind == identity.RevisionTombstone {
+		return identity.TextRevision{}, identity.ErrNotFound
 	}
 	var sequence int64
 	if err := s.tx.QueryRow(ctx, `
@@ -141,6 +162,72 @@ func (s *txStore) AppendImageRevision(ctx context.Context, workspaceID, pasteID,
 		return identity.TextRevision{}, err
 	}
 	return identity.TextRevision{WorkspaceID: workspaceID, PasteID: pasteID, RevisionID: revisionID, RevisionKind: "image_bundle", ServerSequence: sequence, CreatedAt: createdAt, ExpiresAt: expiresAt, Assets: assets}, nil
+}
+
+func (s *txStore) AppendAttachmentRevision(ctx context.Context, workspaceID, pasteID, revisionID, eventType string, assets []identity.ImageAsset, createdAt, expiresAt time.Time) (identity.TextRevision, error) {
+	if len(assets) > images.MaxAttachmentItems || eventType != "paste.revised" {
+		return identity.TextRevision{}, identity.ErrInvalid
+	}
+	seenIndexes := make([]bool, len(assets))
+	for _, asset := range assets {
+		if asset.AssetIndex < 0 || asset.AssetIndex >= len(assets) || seenIndexes[asset.AssetIndex] {
+			return identity.TextRevision{}, identity.ErrInvalid
+		}
+		seenIndexes[asset.AssetIndex] = true
+	}
+	var lockedWorkspaceID string
+	lockErr := s.tx.QueryRow(ctx, `
+select id::text from workspaces
+where id = $1::uuid
+for update`, workspaceID).Scan(&lockedWorkspaceID)
+	if errors.Is(lockErr, pgx.ErrNoRows) {
+		return identity.TextRevision{}, identity.ErrNotFound
+	}
+	if lockErr != nil {
+		return identity.TextRevision{}, lockErr
+	}
+	var latestKind string
+	latestErr := s.tx.QueryRow(ctx, `select revision_kind from paste_revisions where workspace_id=$1::uuid and paste_id=$2::uuid order by server_sequence desc limit 1`, workspaceID, pasteID).Scan(&latestKind)
+	if errors.Is(latestErr, pgx.ErrNoRows) {
+		return identity.TextRevision{}, identity.ErrNotFound
+	}
+	if latestErr != nil {
+		return identity.TextRevision{}, latestErr
+	}
+	if latestKind == identity.RevisionTombstone {
+		return identity.TextRevision{}, identity.ErrNotFound
+	}
+
+	var sequence int64
+	if err := s.tx.QueryRow(ctx, `update workspaces set next_event_sequence = next_event_sequence + 1 where id = $1::uuid returning next_event_sequence`, workspaceID).Scan(&sequence); err != nil {
+		return identity.TextRevision{}, err
+	}
+	if _, err := s.tx.Exec(ctx, `insert into paste_revisions(id,workspace_id,paste_id,server_sequence,revision_kind,created_at,expires_at) values ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7)`, revisionID, workspaceID, pasteID, sequence, identity.RevisionAttachmentBundle, createdAt, expiresAt); err != nil {
+		return identity.TextRevision{}, err
+	}
+	copiedAssets := make([]identity.ImageAsset, len(assets))
+	for _, asset := range assets {
+		if _, err := s.tx.Exec(ctx, `insert into paste_assets(workspace_id,paste_id,revision_id,asset_index,mime_type,width,height,byte_size,storage_key,image_key_id,image_nonce,created_at,expires_at) values ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, workspaceID, pasteID, revisionID, asset.AssetIndex, asset.MIMEType, asset.Width, asset.Height, asset.ByteSize, asset.StorageKey, asset.Envelope.KeyID, asset.Envelope.Nonce, createdAt, expiresAt); err != nil {
+			return identity.TextRevision{}, err
+		}
+		copiedAsset := asset
+		copiedAsset.WorkspaceID = workspaceID
+		copiedAsset.PasteID = pasteID
+		copiedAsset.RevisionID = revisionID
+		copiedAsset.ExpiresAt = expiresAt
+		copiedAsset.Envelope.Nonce = bytes.Clone(asset.Envelope.Nonce)
+		copiedAsset.Envelope.Ciphertext = bytes.Clone(asset.Envelope.Ciphertext)
+		copiedAsset.Bytes = bytes.Clone(asset.Bytes)
+		copiedAssets[asset.AssetIndex] = copiedAsset
+	}
+	if _, err := s.tx.Exec(ctx, `insert into workspace_events(workspace_id,sequence,event_type,object_id,created_at,expires_at) values ($1::uuid,$2,$3,$4::uuid,$5,$6)`, workspaceID, sequence, eventType, pasteID, createdAt, createdAt.Add(identity.EventLifetime)); err != nil {
+		return identity.TextRevision{}, err
+	}
+	return identity.TextRevision{
+		WorkspaceID: workspaceID, PasteID: pasteID, RevisionID: revisionID,
+		RevisionKind: identity.RevisionAttachmentBundle, ServerSequence: sequence,
+		CreatedAt: createdAt, ExpiresAt: expiresAt, Assets: copiedAssets,
+	}, nil
 }
 
 func (s *txStore) ListImageAssets(ctx context.Context, workspaceID, pasteID, revisionID string) ([]identity.ImageAsset, error) {
@@ -317,18 +404,17 @@ where paste.workspace_id = orphan_pastes.workspace_id
 	return revisions, pastes, err
 }
 
-func (s *Store) PurgeImages(ctx context.Context, now time.Time, expired []identity.ImageAsset) (int64, int64, error) {
+func (s *Store) PurgeImageRevisions(ctx context.Context, now time.Time, expired []identity.ExpiredImageRevision) (int64, int64, error) {
 	if len(expired) == 0 {
 		return 0, 0, nil
 	}
+	workspaceIDs := make([]string, 0, len(expired))
+	pasteIDs := make([]string, 0, len(expired))
 	revisionIDs := make([]string, 0, len(expired))
-	seen := make(map[string]struct{}, len(expired))
-	for _, asset := range expired {
-		if _, ok := seen[asset.RevisionID]; ok {
-			continue
-		}
-		revisionIDs = append(revisionIDs, asset.RevisionID)
-		seen[asset.RevisionID] = struct{}{}
+	for _, revision := range expired {
+		workspaceIDs = append(workspaceIDs, revision.WorkspaceID)
+		pasteIDs = append(pasteIDs, revision.PasteID)
+		revisionIDs = append(revisionIDs, revision.RevisionID)
 	}
 	var revisions, assets int64
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -337,82 +423,145 @@ func (s *Store) PurgeImages(ctx context.Context, now time.Time, expired []identi
 		}
 		command, err := tx.Exec(ctx, `
 with selected_revisions as (
-    select revision_id
-    from unnest($2::uuid[]) as selected(revision_id)
+    select workspace_id, paste_id, revision_id
+    from unnest($2::uuid[], $3::uuid[], $4::uuid[])
+         as selected(workspace_id, paste_id, revision_id)
+),
+eligible_revisions as (
+    select selected.workspace_id, selected.paste_id, selected.revision_id
+    from selected_revisions as selected
+    join paste_revisions as revision
+      on revision.workspace_id = selected.workspace_id
+     and revision.paste_id = selected.paste_id
+     and revision.id = selected.revision_id
+    where revision.expires_at <= $1
+      and revision.revision_kind in ('image_bundle', 'attachment_bundle')
 )
 delete from paste_assets as asset
-using selected_revisions
-where asset.revision_id = selected_revisions.revision_id
-  and asset.expires_at <= $1`, now, revisionIDs)
+using eligible_revisions as selected
+where asset.workspace_id = selected.workspace_id
+  and asset.paste_id = selected.paste_id
+  and asset.revision_id = selected.revision_id`, now, workspaceIDs, pasteIDs, revisionIDs)
 		if err != nil {
 			return err
 		}
 		assets = command.RowsAffected()
-		command, err = tx.Exec(ctx, `
+		rows, err := tx.Query(ctx, `
 with selected_revisions as (
-    select revision_id
-    from unnest($2::uuid[]) as selected(revision_id)
+    select workspace_id, paste_id, revision_id
+    from unnest($2::uuid[], $3::uuid[], $4::uuid[])
+         as selected(workspace_id, paste_id, revision_id)
 )
 delete from paste_revisions as revision
-using selected_revisions
-where revision.id = selected_revisions.revision_id
+using selected_revisions as selected
+where revision.workspace_id = selected.workspace_id
+  and revision.paste_id = selected.paste_id
+  and revision.id = selected.revision_id
   and revision.expires_at <= $1
-  and revision.revision_kind = 'image_bundle'`, now, revisionIDs)
+  and revision.revision_kind in ('image_bundle', 'attachment_bundle')
+returning revision.workspace_id::text, revision.paste_id::text`, now, workspaceIDs, pasteIDs, revisionIDs)
 		if err != nil {
 			return err
 		}
-		revisions = command.RowsAffected()
+		deletedWorkspaceIDs := make([]string, 0, len(expired))
+		deletedPasteIDs := make([]string, 0, len(expired))
+		for rows.Next() {
+			var workspaceID, pasteID string
+			if err := rows.Scan(&workspaceID, &pasteID); err != nil {
+				rows.Close()
+				return err
+			}
+			deletedWorkspaceIDs = append(deletedWorkspaceIDs, workspaceID)
+			deletedPasteIDs = append(deletedPasteIDs, pasteID)
+			revisions++
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if len(deletedWorkspaceIDs) == 0 {
+			return nil
+		}
 		_, err = tx.Exec(ctx, `
-with orphan_pastes as (
-    select p.workspace_id, p.id
-    from pastes p
-    where not exists (select 1 from paste_revisions r where r.workspace_id = p.workspace_id and r.paste_id = p.id)
-    order by p.workspace_id, p.id
-    for update skip locked
-    limit 100
+with selected_pastes as (
+    select distinct workspace_id, paste_id
+    from unnest($1::uuid[], $2::uuid[]) as selected(workspace_id, paste_id)
 )
 delete from pastes as paste
-using orphan_pastes
-where paste.workspace_id = orphan_pastes.workspace_id
-  and paste.id = orphan_pastes.id`)
-		return err
+using selected_pastes as selected
+where paste.workspace_id = selected.workspace_id
+  and paste.id = selected.paste_id
+  and not exists (
+      select 1
+      from paste_revisions as revision
+      where revision.workspace_id = paste.workspace_id
+        and revision.paste_id = paste.id
+  )`, deletedWorkspaceIDs, deletedPasteIDs)
+		if err != nil {
+			return err
+		}
+		return nil
 	})
 	return revisions, assets, err
 }
 
-func (s *Store) ListExpiredImages(ctx context.Context, now time.Time, limit int) ([]identity.ImageAsset, error) {
+func (s *Store) ListExpiredImageRevisions(ctx context.Context, now time.Time, limit int) ([]identity.ExpiredImageRevision, error) {
 	if limit <= 0 {
-		return []identity.ImageAsset{}, nil
+		return []identity.ExpiredImageRevision{}, nil
 	}
 	rows, err := s.pool.Query(ctx, `
-select workspace_id::text, paste_id::text, revision_id::text, asset_index,
-       mime_type, width, height, byte_size, expires_at, storage_key, image_key_id, image_nonce
-from (
-    select distinct on (asset.revision_id)
-           asset.workspace_id, asset.paste_id, asset.revision_id, asset.asset_index,
-           asset.mime_type, asset.width, asset.height, asset.byte_size, asset.expires_at,
-           asset.storage_key, asset.image_key_id, asset.image_nonce
-    from paste_assets as asset
-    join paste_revisions as revision
-      on revision.workspace_id = asset.workspace_id and revision.id = asset.revision_id
-    where asset.expires_at <= $1
-      and revision.expires_at <= $1
-      and revision.revision_kind = 'image_bundle'
-    order by asset.revision_id, asset.asset_index
-) as expired
-order by expires_at, workspace_id, paste_id, revision_id
-limit $2`, now, limit)
+with selected_revisions as (
+    select workspace_id, paste_id, id, expires_at
+    from paste_revisions
+    where expires_at <= $1
+      and revision_kind in ('image_bundle', 'attachment_bundle')
+    order by expires_at, workspace_id, paste_id, id
+    limit $2
+)
+select revision.workspace_id::text, revision.paste_id::text, revision.id::text,
+       asset.id is not null,
+       coalesce(asset.asset_index, 0), coalesce(asset.mime_type, ''),
+       coalesce(asset.width, 0), coalesce(asset.height, 0), coalesce(asset.byte_size, 0),
+       coalesce(asset.expires_at, 'epoch'::timestamptz), coalesce(asset.storage_key, ''),
+       coalesce(asset.image_key_id, ''), coalesce(asset.image_nonce, ''::bytea)
+from selected_revisions as revision
+left join paste_assets as asset
+  on asset.workspace_id = revision.workspace_id
+ and asset.paste_id = revision.paste_id
+ and asset.revision_id = revision.id
+order by revision.expires_at, revision.workspace_id, revision.paste_id, revision.id, asset.asset_index`, now, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	assets := make([]identity.ImageAsset, 0)
+	revisions := make([]identity.ExpiredImageRevision, 0)
 	for rows.Next() {
+		var workspaceID, pasteID, revisionID string
+		var hasAsset bool
 		var asset identity.ImageAsset
-		if err := rows.Scan(&asset.WorkspaceID, &asset.PasteID, &asset.RevisionID, &asset.AssetIndex, &asset.MIMEType, &asset.Width, &asset.Height, &asset.ByteSize, &asset.ExpiresAt, &asset.StorageKey, &asset.Envelope.KeyID, &asset.Envelope.Nonce); err != nil {
+		if err := rows.Scan(
+			&workspaceID, &pasteID, &revisionID, &hasAsset,
+			&asset.AssetIndex, &asset.MIMEType, &asset.Width, &asset.Height, &asset.ByteSize,
+			&asset.ExpiresAt, &asset.StorageKey, &asset.Envelope.KeyID, &asset.Envelope.Nonce,
+		); err != nil {
 			return nil, err
 		}
-		assets = append(assets, asset)
+		if len(revisions) == 0 || revisions[len(revisions)-1].RevisionID != revisionID {
+			revisions = append(revisions, identity.ExpiredImageRevision{
+				WorkspaceID: workspaceID,
+				PasteID:     pasteID,
+				RevisionID:  revisionID,
+				Assets:      []identity.ImageAsset{},
+			})
+		}
+		if hasAsset {
+			asset.WorkspaceID = workspaceID
+			asset.PasteID = pasteID
+			asset.RevisionID = revisionID
+			index := len(revisions) - 1
+			revisions[index].Assets = append(revisions[index].Assets, asset)
+		}
 	}
-	return assets, rows.Err()
+	return revisions, rows.Err()
 }

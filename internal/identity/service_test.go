@@ -118,6 +118,36 @@ type shortCodeGuardTx struct {
 	lookupCalls int
 }
 
+type pairingStatusStore struct {
+	identity.Store
+	pairing       identity.Pairing
+	expectedHash  []byte
+	rateRules     []identity.RateRule
+	withinTxCalls int
+}
+
+type pairingStatusTx struct {
+	identity.TxStore
+	store *pairingStatusStore
+}
+
+func (s *pairingStatusStore) ConsumeRateLimit(_ context.Context, rule identity.RateRule, _ []byte, _ time.Time) (identity.RateDecision, error) {
+	s.rateRules = append(s.rateRules, rule)
+	return identity.RateDecision{Allowed: true}, nil
+}
+
+func (s *pairingStatusStore) WithinTx(_ context.Context, fn func(identity.TxStore) error) error {
+	s.withinTxCalls++
+	return fn(&pairingStatusTx{store: s})
+}
+
+func (tx *pairingStatusTx) GetPairingForStatus(_ context.Context, _ string, claimHash []byte, _ time.Time) (identity.Pairing, error) {
+	if !bytes.Equal(claimHash, tx.store.expectedHash) {
+		return identity.Pairing{}, identity.ErrInvalidClaim
+	}
+	return tx.store.pairing, nil
+}
+
 var errMutationTransactionReached = errors.New("mutation transaction reached")
 
 type recoveryPrecomputeStore struct {
@@ -202,6 +232,105 @@ func (s *shortCodeGuardStore) WithinTx(ctx context.Context, fn func(identity.TxS
 func (s *shortCodeGuardTx) GetPairingByShortCode(context.Context, string, string, time.Time) (identity.Pairing, error) {
 	s.lookupCalls++
 	panic("malformed short code reached repository lookup")
+}
+
+func TestPairingStatusStatesAndPollingQuota(t *testing.T) {
+	now := time.Date(2026, time.August, 14, 12, 0, 0, 123456789, time.UTC)
+	claimSecret, claimHash, err := secure.NewClaimSecret(bytes.NewReader(bytes.Repeat([]byte{0x71}, 32)))
+	if err != nil {
+		t.Fatal("NewClaimSecret() failed")
+	}
+	pairingID := "00000000-0000-4000-8000-000000000391"
+
+	tests := []struct {
+		name      string
+		pairing   identity.Pairing
+		want      string
+		wantClaim bool
+	}{
+		{
+			name: "denied takes precedence over expiry",
+			pairing: identity.Pairing{
+				ID: pairingID, ExpiresAt: now.Add(-time.Minute),
+				ClaimInvalidatedAt: now.Add(-2 * time.Minute),
+			},
+			want: "denied",
+		},
+		{
+			name:    "pending expiry",
+			pairing: identity.Pairing{ID: pairingID, ExpiresAt: now},
+			want:    "expired",
+		},
+		{
+			name: "approved claim expiry",
+			pairing: identity.Pairing{
+				ID: pairingID, WorkspaceID: "00000000-0000-4000-8000-000000000001",
+				ExpiresAt: now.Add(time.Minute), ClaimExpiresAt: now,
+			},
+			want:      "expired",
+			wantClaim: true,
+		},
+		{
+			name: "approved",
+			pairing: identity.Pairing{
+				ID: pairingID, WorkspaceID: "00000000-0000-4000-8000-000000000001",
+				ExpiresAt: now.Add(time.Minute), ClaimExpiresAt: now.Add(time.Minute),
+			},
+			want:      "approved",
+			wantClaim: true,
+		},
+		{
+			name:    "pending",
+			pairing: identity.Pairing{ID: pairingID, ExpiresAt: now.Add(time.Minute)},
+			want:    "pending",
+		},
+	}
+
+	for _, item := range tests {
+		t.Run(item.name, func(t *testing.T) {
+			store := &pairingStatusStore{pairing: item.pairing, expectedHash: claimHash}
+			service := identity.NewService(store, nil, nil, fixedClock{value: now})
+			response, err := service.PairingStatus(context.Background(), "192.0.2.61", pairingID, claimSecret)
+			if err != nil {
+				t.Fatalf("PairingStatus() error = %v", err)
+			}
+			if response.PairingID != pairingID || response.Status != item.want || !response.ExpiresAt.Equal(item.pairing.ExpiresAt.UTC().Truncate(time.Second)) {
+				t.Fatalf("PairingStatus() metadata = %q/%q/%s", response.PairingID, response.Status, response.ExpiresAt)
+			}
+			if (response.ClaimExpiresAt != nil) != item.wantClaim {
+				t.Fatalf("PairingStatus() claim expiry present = %t", response.ClaimExpiresAt != nil)
+			}
+			if len(store.rateRules) != 2 || store.rateRules[0] != (identity.RateRule{Scope: "pairing.status.ip", Limit: 60, Window: 10 * time.Minute}) || store.rateRules[1] != (identity.RateRule{Scope: "pairing.status.id", Limit: 60, Window: 10 * time.Minute}) {
+				t.Fatalf("PairingStatus() rate rules = %#v", store.rateRules)
+			}
+			if store.withinTxCalls != 1 {
+				t.Fatalf("PairingStatus() transaction calls = %d", store.withinTxCalls)
+			}
+		})
+	}
+}
+
+func TestPairingStatusRejectsMalformedIDBeforeQuotaAndStorage(t *testing.T) {
+	store := &pairingStatusStore{}
+	service := identity.NewService(store, nil, nil, fixedClock{value: time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)})
+	if _, err := service.PairingStatus(context.Background(), "192.0.2.62", "not-a-uuid", "not-inspected"); !errors.Is(err, identity.ErrInvalid) {
+		t.Fatalf("PairingStatus() error = %v", err)
+	}
+	if len(store.rateRules) != 0 || store.withinTxCalls != 0 {
+		t.Fatalf("PairingStatus() malformed ID reached quota/storage = %d/%d", len(store.rateRules), store.withinTxCalls)
+	}
+}
+
+func TestPairingDenyRejectsConnectorScopeBeforeStorage(t *testing.T) {
+	store := &pairingStatusStore{}
+	service := identity.NewService(store, nil, nil, fixedClock{value: time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)})
+	_, err := service.DenyPairing(context.Background(), identity.Principal{Scope: "connector"}, "00000000-0000-4000-8000-000000000392", "00000000-0000-4000-8000-000000000393")
+	if !errors.Is(err, identity.ErrForbidden) {
+		t.Fatalf("DenyPairing() error = %v", err)
+	}
+	if store.withinTxCalls != 0 {
+		t.Fatalf("DenyPairing() connector reached storage = %d", store.withinTxCalls)
+	}
 }
 
 func TestCreateWorkspaceReturnsExactlyTwoCredentialsAndReplaysBytes(t *testing.T) {
