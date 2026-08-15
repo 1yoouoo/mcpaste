@@ -174,6 +174,15 @@ public final class WorkspaceSession {
         pasteIDRemaps[pasteID] ?? pasteID
     }
 
+    public func cachedAttachments(for paste: CachedPaste) -> [NormalizedImage] {
+        guard let attachmentCache, let revisionID = paste.attachmentRevisionID else { return [] }
+        return paste.attachments.sorted { $0.assetIndex < $1.assetIndex }.compactMap { attachment in
+            guard let key = try? AttachmentCache.Key(pasteID: paste.id, revisionID: revisionID, assetIndex: attachment.assetIndex),
+                  let data = try? attachmentCache.data(for: key) else { return nil }
+            return NormalizedImage(mimeType: attachment.mimeType, width: attachment.width, height: attachment.height, data: data)
+        }
+    }
+
     public func cacheAttachments(for record: PasteRecord) async throws {
         guard let attachmentCache else { return }
         guard let api else { throw APIError.invalidResponse }

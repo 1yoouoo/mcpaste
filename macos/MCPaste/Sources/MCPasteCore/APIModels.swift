@@ -13,6 +13,10 @@ public struct PasteAttachment: Codable, Equatable, Identifiable {
     public let byteSize: Int64
     public let expiresAt: Date
     public var id: Int { assetIndex }
+    public init(assetIndex: Int, mimeType: String, width: Int, height: Int, byteSize: Int64, expiresAt: Date) {
+        self.assetIndex = assetIndex; self.mimeType = mimeType; self.width = width
+        self.height = height; self.byteSize = byteSize; self.expiresAt = expiresAt
+    }
 
     enum CodingKeys: String, CodingKey {
         case assetIndex = "asset_index"

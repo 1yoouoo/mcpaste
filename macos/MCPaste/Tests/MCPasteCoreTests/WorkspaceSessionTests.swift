@@ -224,6 +224,49 @@ final class WorkspaceSessionTests: XCTestCase {
         XCTAssertEqual(session.syncState, .failed)
     }
 
+    func testCachedAttachmentsReturnsStoredImagesInAssetOrder() throws {
+        let cache = try SQLiteCache(path: ":memory:")
+        let cacheRoot = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let attachmentCache = try AttachmentCache(root: cacheRoot)
+        let pasteID = "11111111-1111-4111-8111-111111111111"
+        let revisionID = "22222222-2222-4222-8222-222222222222"
+        try attachmentCache.store(Data([1, 1]), for: try AttachmentCache.Key(pasteID: pasteID, revisionID: revisionID, assetIndex: 0))
+        try attachmentCache.store(Data([2, 2]), for: try AttachmentCache.Key(pasteID: pasteID, revisionID: revisionID, assetIndex: 1))
+        let session = WorkspaceSession(
+            cache: cache,
+            coordinator: SyncCoordinator(api: ReplayWorkspaceAPI(), cache: cache),
+            attachmentCache: attachmentCache
+        )
+        let paste = CachedPaste(
+            id: pasteID,
+            revisionID: revisionID,
+            sequence: 1,
+            text: nil,
+            deleted: false,
+            expiresAt: Date().addingTimeInterval(3600),
+            attachmentRevisionID: revisionID,
+            attachments: [
+                PasteAttachment(assetIndex: 0, mimeType: "image/png", width: 10, height: 10, byteSize: 2, expiresAt: Date().addingTimeInterval(3600)),
+                PasteAttachment(assetIndex: 1, mimeType: "image/jpeg", width: 20, height: 20, byteSize: 2, expiresAt: Date().addingTimeInterval(3600))
+            ]
+        )
+
+        let images = session.cachedAttachments(for: paste)
+
+        XCTAssertEqual(images.map(\.data), [Data([1, 1]), Data([2, 2])])
+        XCTAssertEqual(images.map(\.mimeType), ["image/png", "image/jpeg"])
+        XCTAssertEqual(images.map(\.width), [10, 20])
+    }
+
+    func testCachedAttachmentsIsEmptyWithoutRevision() throws {
+        let cache = try SQLiteCache(path: ":memory:")
+        let session = WorkspaceSession(cache: cache, coordinator: SyncCoordinator(api: ReplayWorkspaceAPI(), cache: cache))
+        let paste = CachedPaste(id: "p", revisionID: "r", sequence: 1, text: "hi", deleted: false, expiresAt: Date().addingTimeInterval(60))
+
+        XCTAssertTrue(session.cachedAttachments(for: paste).isEmpty)
+    }
+
     private func temporaryDirectory() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("mcpaste-session-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -13,8 +13,8 @@ public struct KeychainCredential: Codable, Equatable {
 }
 
 public final class KeychainStore {
-    private let service = "com.mcpaste.credentials"
-    public init() {}
+    private let service: String
+    public init(service: String = "com.mcpaste.credentials") { self.service = service }
 
     public func save(_ credential: KeychainCredential) throws {
         let data = try JSONEncoder().encode(credential)
@@ -28,23 +28,34 @@ public final class KeychainStore {
     }
 
     public func load(workspaceID: String, deviceID: String, scope: String = "full") throws -> KeychainCredential? {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account(workspaceID: workspaceID, deviceID: deviceID, scope: scope), kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
+        try load(account: account(workspaceID: workspaceID, deviceID: deviceID, scope: scope))
+    }
+
+    public func loadAll() throws -> [KeychainCredential] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess, let values = result as? [[String: Any]] else { throw KeychainError.operation }
+        return try values.map { attributes in
+            guard let account = attributes[kSecAttrAccount as String] as? String,
+                  let credential = try load(account: account) else { throw KeychainError.operation }
+            return credential
+        }
+    }
+
+    private func load(account: String) throws -> KeychainCredential? {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account, kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = result as? Data else { throw KeychainError.operation }
         do { return try JSONDecoder().decode(KeychainCredential.self, from: data) } catch { throw KeychainError.operation }
-    }
-
-    public func loadAll() throws -> [KeychainCredential] {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitAll]
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound { return [] }
-        guard status == errSecSuccess, let values = result as? [Data] else { throw KeychainError.operation }
-        return try values.map { data in
-            do { return try JSONDecoder().decode(KeychainCredential.self, from: data) } catch { throw KeychainError.operation }
-        }
     }
 
     public func remove(workspaceID: String, deviceID: String, scope: String = "full") throws {
