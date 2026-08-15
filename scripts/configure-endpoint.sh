@@ -25,7 +25,11 @@ case "$authority" in
     .*|*.) fail ;;
 esac
 
-output="macos/MCPaste/Sources/MCPasteCore/EndpointConfiguration.generated.swift"
+# Resolve the output from the script's own location so the workflows, which invoke it
+# from macos/MCPaste, write into the package instead of a nested copy of it.
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || fail
+repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd) || fail
+output="$repository_root/macos/MCPaste/Sources/MCPasteCore/EndpointConfiguration.generated.swift"
 directory=$(dirname "$output")
 mkdir -p "$directory"
 temporary=$(mktemp "$directory/.EndpointConfiguration.generated.swift.XXXXXX")

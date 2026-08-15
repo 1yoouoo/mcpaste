@@ -62,6 +62,7 @@ jobs:
         run: |
           bash deploy/tests/deploy_scripts_test.sh
           bash deploy/tests/workflow_contract_test.sh
+          bash deploy/tests/configure_endpoint_test.sh
           bash deploy/compose.production.test.sh
 
       - name: Check formatting
