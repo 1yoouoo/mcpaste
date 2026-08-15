@@ -32,6 +32,23 @@ type Config struct {
 	DataDir           string
 	CleanupInterval   time.Duration
 	TrustedProxyCIDRs []*net.IPNet
+	S3                S3Settings
+}
+
+// S3Settings points image storage at an S3-compatible bucket. When it is empty the
+// service keeps images on the local disk under DataDir.
+type S3Settings struct {
+	Endpoint  string
+	Region    string
+	Bucket    string
+	Prefix    string
+	AccessKey string
+	SecretKey string
+}
+
+// ObjectStorageEnabled reports whether images belong in the configured bucket.
+func (c Config) ObjectStorageEnabled() bool {
+	return c.S3.Bucket != "" && c.S3.AccessKey != "" && c.S3.SecretKey != ""
 }
 
 type LookupEnv func(string) (string, bool)
@@ -114,7 +131,39 @@ func Load(lookup LookupEnv) (Config, error) {
 	if cfg.Environment == Production && len(cfg.TrustedProxyCIDRs) == 0 {
 		return Config{}, fmt.Errorf("MCPASTE_TRUSTED_PROXY_CIDRS is required in production")
 	}
+	if err := loadS3Settings(lookup, &cfg); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func loadS3Settings(lookup LookupEnv, cfg *Config) error {
+	settings := S3Settings{}
+	settings.Endpoint, _ = nonEmpty(lookup, "MCPASTE_S3_ENDPOINT")
+	settings.Region, _ = nonEmpty(lookup, "MCPASTE_S3_REGION")
+	settings.Bucket, _ = nonEmpty(lookup, "MCPASTE_S3_BUCKET")
+	settings.Prefix, _ = nonEmpty(lookup, "MCPASTE_S3_PREFIX")
+	settings.AccessKey, _ = nonEmpty(lookup, "MCPASTE_S3_ACCESS_KEY_ID")
+	settings.SecretKey, _ = nonEmpty(lookup, "MCPASTE_S3_SECRET_ACCESS_KEY")
+
+	provided := settings.Endpoint != "" || settings.Region != "" || settings.Bucket != "" ||
+		settings.AccessKey != "" || settings.SecretKey != ""
+	if !provided {
+		return nil
+	}
+	if settings.Endpoint == "" || settings.Region == "" || settings.Bucket == "" ||
+		settings.AccessKey == "" || settings.SecretKey == "" {
+		return fmt.Errorf("MCPASTE_S3_ENDPOINT, MCPASTE_S3_REGION, MCPASTE_S3_BUCKET, MCPASTE_S3_ACCESS_KEY_ID, and MCPASTE_S3_SECRET_ACCESS_KEY must be set together")
+	}
+	endpoint, err := url.Parse(settings.Endpoint)
+	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "https" && endpoint.Scheme != "http") {
+		return fmt.Errorf("MCPASTE_S3_ENDPOINT must be an absolute http or https URL")
+	}
+	if cfg.Environment == Production && endpoint.Scheme != "https" {
+		return fmt.Errorf("MCPASTE_S3_ENDPOINT must use https in production")
+	}
+	cfg.S3 = settings
+	return nil
 }
 
 func defaultDataDir() string {

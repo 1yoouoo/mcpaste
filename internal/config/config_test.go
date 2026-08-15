@@ -115,3 +115,75 @@ func mapLookup(values map[string]string) LookupEnv {
 		return value, ok
 	}
 }
+
+func TestLoadReadsObjectStorageSettings(t *testing.T) {
+	values := requiredValues()
+	values["MCPASTE_S3_ENDPOINT"] = "https://mcpaste.sgp1.digitaloceanspaces.com"
+	values["MCPASTE_S3_REGION"] = "sgp1"
+	values["MCPASTE_S3_BUCKET"] = "mcpaste"
+	values["MCPASTE_S3_PREFIX"] = "prod"
+	values["MCPASTE_S3_ACCESS_KEY_ID"] = "access"
+	values["MCPASTE_S3_SECRET_ACCESS_KEY"] = "secret"
+
+	cfg, err := Load(mapLookup(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ObjectStorageEnabled() {
+		t.Fatal("object storage should be enabled when the bucket and credentials are set")
+	}
+	if cfg.S3.Endpoint != "https://mcpaste.sgp1.digitaloceanspaces.com" || cfg.S3.Region != "sgp1" {
+		t.Fatalf("endpoint/region = %q/%q", cfg.S3.Endpoint, cfg.S3.Region)
+	}
+	if cfg.S3.Bucket != "mcpaste" || cfg.S3.Prefix != "prod" {
+		t.Fatalf("bucket/prefix = %q/%q", cfg.S3.Bucket, cfg.S3.Prefix)
+	}
+}
+
+func TestLoadKeepsObjectStorageDisabledByDefault(t *testing.T) {
+	cfg, err := Load(mapLookup(requiredValues()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ObjectStorageEnabled() {
+		t.Fatal("object storage must stay disabled without configuration")
+	}
+}
+
+func TestLoadRejectsPartialObjectStorageSettings(t *testing.T) {
+	for _, missing := range []string{
+		"MCPASTE_S3_ENDPOINT",
+		"MCPASTE_S3_REGION",
+		"MCPASTE_S3_BUCKET",
+		"MCPASTE_S3_ACCESS_KEY_ID",
+		"MCPASTE_S3_SECRET_ACCESS_KEY",
+	} {
+		values := requiredValues()
+		values["MCPASTE_S3_ENDPOINT"] = "https://mcpaste.sgp1.digitaloceanspaces.com"
+		values["MCPASTE_S3_REGION"] = "sgp1"
+		values["MCPASTE_S3_BUCKET"] = "mcpaste"
+		values["MCPASTE_S3_ACCESS_KEY_ID"] = "access"
+		values["MCPASTE_S3_SECRET_ACCESS_KEY"] = "secret"
+		delete(values, missing)
+
+		if _, err := Load(mapLookup(values)); err == nil {
+			t.Fatalf("expected an error when %s is missing", missing)
+		}
+	}
+}
+
+func TestLoadRejectsInsecureObjectStorageEndpointInProduction(t *testing.T) {
+	values := requiredValues()
+	values["MCPASTE_ENV"] = "production"
+	values["MCPASTE_DATA_DIR"] = "/var/lib/mcpaste/data"
+	values["MCPASTE_TRUSTED_PROXY_CIDRS"] = "10.0.0.0/8"
+	values["MCPASTE_S3_ENDPOINT"] = "http://mcpaste.sgp1.digitaloceanspaces.com"
+	values["MCPASTE_S3_REGION"] = "sgp1"
+	values["MCPASTE_S3_BUCKET"] = "mcpaste"
+	values["MCPASTE_S3_ACCESS_KEY_ID"] = "access"
+	values["MCPASTE_S3_SECRET_ACCESS_KEY"] = "secret"
+
+	if _, err := Load(mapLookup(values)); err == nil {
+		t.Fatal("expected an error for a plaintext object storage endpoint in production")
+	}
+}

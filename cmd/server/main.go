@@ -58,9 +58,9 @@ func run() error {
 		return errors.New("load encryption keyring")
 	}
 	service := identity.NewService(identitypostgres.New(pool), keyring, secure.SystemRandom{}, identity.RealClock{})
-	imageStore, err := images.NewFileStore(cfg.DataDir, keyring)
+	imageStore, err := newImageStore(cfg, keyring)
 	if err != nil {
-		return errors.New("load image storage")
+		return err
 	}
 	service.SetImageStore(imageStore)
 	application := httpserver.NewApplicationHandler(
@@ -139,6 +139,28 @@ func requireCurrentSchema(ctx context.Context, pool *pgxpool.Pool, available []m
 }
 
 const databaseReadinessTimeout = 2 * time.Second
+
+func newImageStore(cfg config.Config, keyring *secure.Keyring) (identity.ImageStore, error) {
+	if cfg.ObjectStorageEnabled() {
+		store, err := images.NewS3Store(images.S3Config{
+			Endpoint:  cfg.S3.Endpoint,
+			Region:    cfg.S3.Region,
+			Bucket:    cfg.S3.Bucket,
+			Prefix:    cfg.S3.Prefix,
+			AccessKey: cfg.S3.AccessKey,
+			SecretKey: cfg.S3.SecretKey,
+		}, keyring, nil)
+		if err != nil {
+			return nil, errors.New("load object image storage")
+		}
+		return store, nil
+	}
+	store, err := images.NewFileStore(cfg.DataDir, keyring)
+	if err != nil {
+		return nil, errors.New("load image storage")
+	}
+	return store, nil
+}
 
 func databaseReadiness(pool *pgxpool.Pool, available []migrate.Migration) httpserver.ReadinessFunc {
 	return databaseReadinessWithin(pool, available, databaseReadinessTimeout)
