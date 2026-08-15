@@ -25,3 +25,17 @@ fi
 grep -Eq 'docker compose.*up -d server caddy' "$root/deploy/deploy-image.sh"
 grep -Eq 'mcpaste-postgres:/var/lib/postgresql$' "$root/deploy/compose.production.yaml"
 ! grep -Eq 'mcpaste-postgres:/var/lib/postgresql/data$' "$root/deploy/compose.production.yaml"
+
+# Image storage in an S3-compatible bucket needs outbound access from the server only.
+# The database and the shared private network stay internal.
+compose="$root/deploy/compose.production.yaml"
+grep -Eq '^  private:' "$compose"
+grep -A1 -E '^  private:' "$compose" | grep -Eq 'internal: true'
+grep -Eq '^  egress:' "$compose"
+! grep -A1 -E '^  egress:' "$compose" | grep -Eq 'internal: true'
+server_networks="$(awk '/^  server:/{f=1} f&&/^    networks:/{n=1;next} n&&/^      - /{print $2} n&&!/^      - /{exit}' "$compose")"
+printf '%s\n' "$server_networks" | grep -Fxq private
+printf '%s\n' "$server_networks" | grep -Fxq egress
+postgres_networks="$(awk '/^  postgres:/{f=1} f&&/^    networks:/{n=1;next} n&&/^      - /{print $2} n&&!/^      - /{exit}' "$compose")"
+printf '%s\n' "$postgres_networks" | grep -Fxq private
+! printf '%s\n' "$postgres_networks" | grep -Fxq egress

@@ -41,6 +41,7 @@ services:
       - mcpaste-data:/var/lib/mcpaste/data
     networks:
       - private
+      - egress
     healthcheck:
       test: ["CMD", "/mcpaste-healthcheck", "http://127.0.0.1:8080/readyz"]
       interval: 10s
@@ -83,3 +84,6 @@ networks:
   public:
   private:
     internal: true
+  # Outbound only, for the server to reach the image storage bucket. Nothing is
+  # published here and the database stays off it.
+  egress:
