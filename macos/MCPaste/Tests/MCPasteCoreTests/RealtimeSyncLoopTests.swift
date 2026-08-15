@@ -16,6 +16,21 @@ final class RealtimeSyncLoopTests: XCTestCase {
         XCTAssertEqual(events, [.refresh, .sleep, .refresh, .sleep])
     }
 
+    func testPhaseReportsRealtimeAttemptThenPollingFallback() async {
+        let recorder = PhaseRecorder()
+        let loop = RealtimeSyncLoop(
+            openEvents: { throw APIError.transport },
+            refresh: {},
+            sleep: { _ in },
+            onPhase: { await recorder.record($0) }
+        )
+
+        await loop.run(iterations: 2)
+
+        let phases = await recorder.snapshot()
+        XCTAssertEqual(phases, [.realtime, .polling, .realtime, .polling])
+    }
+
     func testCancellationStopsWithoutAnotherRefresh() async {
         let recorder = LoopRecorder()
         let loop = RealtimeSyncLoop(
@@ -32,6 +47,13 @@ final class RealtimeSyncLoopTests: XCTestCase {
         let events = await recorder.snapshot()
         XCTAssertEqual(events, [.refresh, .sleep])
     }
+}
+
+private actor PhaseRecorder {
+    private(set) var phases: [RealtimeSyncLoop.Phase] = []
+
+    func record(_ phase: RealtimeSyncLoop.Phase) { phases.append(phase) }
+    func snapshot() -> [RealtimeSyncLoop.Phase] { phases }
 }
 
 private actor LoopRecorder {

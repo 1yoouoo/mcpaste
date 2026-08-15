@@ -1,7 +1,14 @@
 import Foundation
+import AppKit
 import MCPasteCore
 
-public enum AppScreen: Equatable { case onboarding, pasteboard }
+public enum AppScreen: Equatable { case onboarding, recovery, pasteboard }
+
+public enum SyncStatus: Equatable {
+    case notConnected
+    case realtime
+    case polling
+}
 
 @MainActor
 public final class AppModel: ObservableObject {
@@ -16,14 +23,31 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var pending = false
     @Published public private(set) var pendingCount = 0
     @Published public private(set) var errorMessage: String?
+    @Published public private(set) var syncStatus: SyncStatus = .notConnected
+    @Published public private(set) var workspaceID: String?
+    @Published public private(set) var lastSyncedAt: Date?
+    @Published public private(set) var attachments: [NormalizedImage] = []
+    /// Background sync health. Kept apart from `errorMessage` so a failed user action never reads as a dropped connection.
+    @Published public private(set) var syncFailed = false
+
+    public var canDeleteCurrentPaste: Bool { currentPasteID != nil }
+    public var selectedPasteID: String? { currentPasteID }
+    public var selectedPaste: CachedPaste? {
+        guard let currentPasteID else { return nil }
+        let resolvedID = session?.resolvedPasteID(currentPasteID) ?? currentPasteID
+        return history.first { $0.id == resolvedID }
+    }
 
     private var api: MCPasteAPI?
-    private var currentPasteID: String?
+    @Published private var currentPasteID: String?
     private let keychain: KeychainStore
     private var session: WorkspaceSession?
     private var pollingTask: Task<Void, Never>?
     public init() { self.keychain = KeychainStore(); Task { await restore() } }
-    public init(keychain: KeychainStore) { self.keychain = keychain }
+    public init(keychain: KeychainStore, restoreOnInit: Bool = false) {
+        self.keychain = keychain
+        if restoreOnInit { Task { await restore() } }
+    }
     deinit { pollingTask?.cancel() }
 
     public func createWorkspace() async {
@@ -35,7 +59,8 @@ public final class AppModel: ObservableObject {
             let grant = try await bootstrap.createWorkspace(deviceName: deviceName)
             guard let credential = grant.credentials.first(where: { $0.kind == "full" }) else { throw APIError.invalidResponse }
             recoveryCode = grant.recoveryCode ?? ""
-            try await install(grant: grant, token: credential.token)
+            guard !recoveryCode.isEmpty else { throw APIError.invalidResponse }
+            try await install(grant: grant, token: credential.token, showsRecovery: true)
         } catch { errorMessage = "Workspace setup failed." }
     }
 
@@ -46,7 +71,8 @@ public final class AppModel: ObservableObject {
             let grant = try await MCPasteAPI(baseURL: url, token: "").recoverWorkspace(recoveryCode: recoveryCode, deviceName: deviceName)
             guard let credential = grant.credentials.first(where: { $0.kind == "full" }) else { throw APIError.invalidResponse }
             recoveryCode = grant.recoveryCode ?? ""
-            try await install(grant: grant, token: credential.token)
+            guard !recoveryCode.isEmpty else { throw APIError.invalidResponse }
+            try await install(grant: grant, token: credential.token, showsRecovery: true)
         } catch { errorMessage = "Workspace recovery failed." }
     }
 
@@ -105,6 +131,7 @@ public final class AppModel: ObservableObject {
             try await api.deletePaste(id: requestPasteID, idempotencyKey: idempotencyKey)
             self.currentPasteID = nil
             draft = ""
+            attachments = []
             try await refreshSession()
             pending = false
         } catch APIError.transport {
@@ -116,13 +143,30 @@ public final class AppModel: ObservableObject {
         } catch { errorMessage = "Paste could not be deleted."; pending = false }
     }
 
+    public static func mergedAttachments(existing: [NormalizedImage], incoming: [NormalizedImage]) throws -> [NormalizedImage] {
+        let merged = existing + incoming
+        try ImageNormalizer.validateAttachmentCount(merged.count)
+        return merged
+    }
+
     public func uploadImages(_ sourceData: [Data]) async {
+        errorMessage = nil
+        do {
+            let normalizer = ImageNormalizer()
+            let normalized = try sourceData.map { try normalizer.normalize($0) }
+            await applyAttachments(try Self.mergedAttachments(existing: attachments, incoming: normalized))
+        } catch { errorMessage = Self.attachmentFailureMessage(for: error) }
+    }
+
+    public func removeAttachment(at index: Int) async {
+        guard attachments.indices.contains(index) else { return }
+        await applyAttachments(attachments.enumerated().filter { $0.offset != index }.map(\.element))
+    }
+
+    private func applyAttachments(_ normalized: [NormalizedImage]) async {
         guard let api, let session else { return }
         pending = true; defer { pending = false }
         do {
-            try ImageNormalizer.validateAttachmentCount(sourceData.count)
-            let normalizer = ImageNormalizer()
-            let normalized = try sourceData.map { try normalizer.normalize($0) }
             guard normalized.reduce(0, { $0 + $1.data.count }) <= ImageNormalizer.maxBundleBytes else { throw ImageNormalizationError.tooLarge }
             let pasteID: String
             if let currentPasteID {
@@ -139,6 +183,7 @@ public final class AppModel: ObservableObject {
                     try session.enqueue(.create, pasteID: localID, body: body, idempotencyKey: createKey)
                     try session.enqueueAttachments(normalized, pasteID: localID, idempotencyKey: UUID().uuidString.lowercased())
                     currentPasteID = localID
+                    attachments = normalized
                     pendingCount = session.pendingCount
                     return
                 }
@@ -149,18 +194,56 @@ public final class AppModel: ObservableObject {
                 let record = try await api.replaceAttachments(pasteID: pasteID, images: normalized, idempotencyKey: attachmentKey)
                 currentPasteID = record.id
                 try await session.cacheAttachments(for: record)
+                attachments = normalized
                 try await refreshSession()
             } catch APIError.transport {
                 try session.enqueueAttachments(normalized, pasteID: pasteID, idempotencyKey: attachmentKey)
+                attachments = normalized
                 pendingCount = session.pendingCount
             }
-        } catch { errorMessage = "Images could not be uploaded." }
+        } catch { errorMessage = Self.attachmentFailureMessage(for: error) }
+    }
+
+    static func attachmentFailureMessage(for error: Error) -> String {
+        switch error {
+        case ImageNormalizationError.tooLarge:
+            return "A paste holds up to \(ImageNormalizer.maxAttachmentItems) images and 32 MB in total."
+        case ImageNormalizationError.animated:
+            return "Animated images are not supported."
+        case ImageNormalizationError.unsupported, ImageNormalizationError.malformed:
+            return "That image format is not supported."
+        case ImageNormalizationError.encodingFailed:
+            return "That image could not be prepared for upload."
+        case APIError.unauthorized:
+            return "This device is no longer signed in to the workspace."
+        case APIError.forbidden:
+            return "This device is not allowed to change pastes."
+        case APIError.notFound:
+            // The API returns the same not_found body for a missing paste and for an unrouted path,
+            // so this names both causes instead of guessing one.
+            return "The server did not accept the images (HTTP 404) — the paste is gone, or this server has no attachment endpoint."
+        case APIError.conflict:
+            return "Another change to this paste is still in flight. Try again."
+        case APIError.invalidResponse:
+            return "The server sent a response the app could not read."
+        case APIError.http(let status):
+            return "The server rejected the images (HTTP \(status))."
+        default:
+            return "Images could not be uploaded."
+        }
     }
 
     public func selectPaste(_ paste: CachedPaste) {
-        guard !paste.deleted, let text = paste.text else { return }
+        guard !paste.deleted else { return }
         currentPasteID = paste.id
-        draft = text
+        draft = paste.text ?? ""
+        attachments = session?.cachedAttachments(for: paste) ?? []
+    }
+
+    public func startNewPaste() {
+        currentPasteID = nil
+        draft = ""
+        attachments = []
     }
 
     public func renameDevice(id: String, displayName: String) async {
@@ -179,12 +262,12 @@ public final class AppModel: ObservableObject {
         try session.enqueue(kind, pasteID: pasteID, body: body, idempotencyKey: idempotencyKey)
     }
 
-    private func install(grant: WorkspaceGrant, token: String) async throws {
+    private func install(grant: WorkspaceGrant, token: String, showsRecovery: Bool = false) async throws {
         let endpoint = try MCPasteEndpoint.baseURL()
         try keychain.save(KeychainCredential(workspaceID: grant.workspaceID, deviceID: grant.deviceID, scope: "full", endpoint: endpoint.absoluteString, token: token))
         try await installSession(workspaceID: grant.workspaceID, deviceID: grant.deviceID, endpoint: endpoint, token: token)
         try await refreshSession()
-        screen = .pasteboard
+        screen = showsRecovery ? .recovery : .pasteboard
     }
 
     private func installSession(workspaceID: String, deviceID: String, endpoint: URL, token: String) async throws {
@@ -196,6 +279,7 @@ public final class AppModel: ObservableObject {
         let attachmentStore = try PendingAttachmentStore(root: cacheDirectory.appendingPathComponent("\(workspaceID)-pending-attachments", isDirectory: true))
         let attachmentCache = try AttachmentCache(root: cacheDirectory.appendingPathComponent("\(workspaceID)-attachment-cache", isDirectory: true))
         api = client
+        self.workspaceID = workspaceID
         session = WorkspaceSession(
             cache: cache,
             coordinator: coordinator,
@@ -218,6 +302,9 @@ public final class AppModel: ObservableObject {
                 },
                 refresh: { @MainActor [weak self] in
                     await self?.refreshSessionReportingError()
+                },
+                onPhase: { @MainActor [weak self] phase in
+                    self?.syncStatus = phase == .realtime ? .realtime : .polling
                 }
             )
             await loop.run()
@@ -232,16 +319,71 @@ public final class AppModel: ObservableObject {
         history = session?.history ?? []
         pendingCount = session?.pendingCount ?? 0
 		devices = session?.devices ?? []
+        refreshCurrentAttachments()
+        lastSyncedAt = Date()
+        syncFailed = false
 	}
+
+    private func refreshCurrentAttachments() {
+        guard let session, let currentPasteID else { return }
+        let resolvedID = session.resolvedPasteID(currentPasteID)
+        guard let paste = history.first(where: { $0.id == resolvedID }) else { return }
+        attachments = session.cachedAttachments(for: paste)
+    }
 
     private func refreshSessionReportingError() async {
         do {
             try await refreshSession()
         } catch {
-            errorMessage = "Sync unavailable."
+            syncFailed = true
         }
     }
 
+    public func retryNow() async {
+        errorMessage = nil
+        await refreshSessionReportingError()
+    }
+
     public func completeOnboarding() { screen = .pasteboard }
+    public func completeRecoverySetup() { screen = .pasteboard }
+    public func copyRecoveryCode() {
+        guard !recoveryCode.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(recoveryCode, forType: .string)
+    }
     public func setPending(_ value: Bool) { pending = value }
 }
+
+#if DEBUG
+extension AppModel {
+    func previewSeed(
+        screen: AppScreen = .pasteboard,
+        draft: String = "",
+        history: [CachedPaste] = [],
+        devices: [DeviceRecord] = [],
+        pending: Bool = false,
+        pendingCount: Int = 0,
+        syncStatus: SyncStatus = .realtime,
+        workspaceID: String? = nil,
+        errorMessage: String? = nil,
+        selectedPasteID: String? = nil,
+        attachments: [NormalizedImage] = [],
+        lastSyncedAt: Date? = nil,
+        syncFailed: Bool = false
+    ) {
+        self.syncFailed = syncFailed
+        self.screen = screen
+        self.draft = draft
+        self.history = history
+        self.devices = devices
+        self.pending = pending
+        self.pendingCount = pendingCount
+        self.syncStatus = syncStatus
+        self.workspaceID = workspaceID
+        self.errorMessage = errorMessage
+        self.currentPasteID = selectedPasteID
+        self.attachments = attachments
+        self.lastSyncedAt = lastSyncedAt
+    }
+}
+#endif

@@ -1,22 +1,31 @@
 import Foundation
 
 public final class RealtimeSyncLoop {
+    public enum Phase: Equatable, Sendable {
+        case realtime
+        case polling
+    }
+
     public typealias OpenEvents = @Sendable () async throws -> Void
     public typealias Refresh = @Sendable () async -> Void
     public typealias Sleep = @Sendable (UInt64) async throws -> Void
+    public typealias OnPhase = @Sendable (Phase) async -> Void
 
     private let openEvents: OpenEvents
     private let refresh: Refresh
     private let sleep: Sleep
+    private let onPhase: OnPhase
 
     public init(
         openEvents: @escaping OpenEvents,
         refresh: @escaping Refresh,
-        sleep: @escaping Sleep = { nanoseconds in try await Task.sleep(nanoseconds: nanoseconds) }
+        sleep: @escaping Sleep = { nanoseconds in try await Task.sleep(nanoseconds: nanoseconds) },
+        onPhase: @escaping OnPhase = { _ in }
     ) {
         self.openEvents = openEvents
         self.refresh = refresh
         self.sleep = sleep
+        self.onPhase = onPhase
     }
 
     public func run(iterations: Int? = nil) async {
@@ -24,6 +33,7 @@ public final class RealtimeSyncLoop {
         var completed = 0
 
         while !Task.isCancelled {
+            await onPhase(.realtime)
             do {
                 try await openEvents()
             } catch is CancellationError {
@@ -33,6 +43,7 @@ public final class RealtimeSyncLoop {
             }
 
             guard !Task.isCancelled else { return }
+            await onPhase(.polling)
             await refresh()
             guard !Task.isCancelled else { return }
 
