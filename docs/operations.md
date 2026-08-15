@@ -2,6 +2,8 @@
 
 This runbook describes the approved single-host topology: Caddy is public on ports 80/443, the Go service and PostgreSQL are private, and image data lives on the persistent `mcpaste-data` volume. The design intentionally has no application backup; losing the host volume loses retained paste data.
 
+Reaching a bucket requires outbound access, which the internal `private` network denies by design. The server therefore also joins an `egress` network that permits outbound connections; the database stays on `private` alone and nothing is published on `egress`. This widens what a compromised application container could reach, and is the cost of storing images off the host — leave the `MCPASTE_S3_*` block empty to keep the server without outbound access.
+
 Image bodies can instead live in an S3-compatible bucket by setting the `MCPASTE_S3_*` block in `/etc/mcpaste/server.env`; the service falls back to the `mcpaste-data` volume whenever that block is empty. Objects are written as envelope ciphertext under `{prefix}/{workspace}/{paste}/{revision}/asset-NN.bin`, so the bucket never holds readable paste content, and every delete is re-checked against that prefix before it runs. Paste metadata still lives in PostgreSQL, so losing the database still loses the pastes regardless of where the bytes are stored.
 
 ## Owner prerequisites
