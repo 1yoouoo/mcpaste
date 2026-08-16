@@ -29,8 +29,24 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var attachments: [NormalizedImage] = []
     /// Background sync health. Kept apart from `errorMessage` so a failed user action never reads as a dropped connection.
     @Published public private(set) var syncFailed = false
+    /// Images accepted but not yet stored, so the window can show them arriving.
+    @Published public private(set) var uploadingCount = 0
+
+    public var isUploading: Bool { uploadingCount > 0 }
+
+    func beginUpload(count: Int) { uploadingCount += max(0, count) }
+    func finishUpload(count: Int = 0) {
+        uploadingCount = count > 0 ? max(0, uploadingCount - count) : 0
+    }
 
     public var canDeleteCurrentPaste: Bool { currentPasteID != nil }
+    /// Text or images the store has not seen yet. Whitespace on its own is not a paste.
+    public var hasUnsavedWork: Bool {
+        guard draft != savedDraft || !attachments.isEmpty else { return false }
+        return !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
+
+    func markDraftSaved() { savedDraft = draft }
     public var selectedPasteID: String? { currentPasteID }
     public var selectedPaste: CachedPaste? {
         guard let currentPasteID else { return nil }
@@ -39,6 +55,8 @@ public final class AppModel: ObservableObject {
     }
 
     private var api: MCPasteAPI?
+    private var savedDraft = ""
+    private let attachmentGate = SerialGate()
     @Published private var currentPasteID: String?
     private let keychain: KeychainStore
     private var session: WorkspaceSession?
@@ -112,6 +130,7 @@ public final class AppModel: ObservableObject {
                 try await api.createPaste(text: draft, idempotencyKey: idempotencyKey)
             }
             currentPasteID = record.id
+            markDraftSaved()
             try await refreshSession()
             pending = false
         } catch APIError.transport {
@@ -131,6 +150,7 @@ public final class AppModel: ObservableObject {
             try await api.deletePaste(id: requestPasteID, idempotencyKey: idempotencyKey)
             self.currentPasteID = nil
             draft = ""
+            savedDraft = ""
             attachments = []
             try await refreshSession()
             pending = false
@@ -150,12 +170,29 @@ public final class AppModel: ObservableObject {
     }
 
     public func uploadImages(_ sourceData: [Data]) async {
+        guard !sourceData.isEmpty else { return }
         errorMessage = nil
+        beginUpload(count: sourceData.count)
+        await serializeAttachmentWork { [weak self] in
+            await self?.performUpload(sourceData)
+        }
+        finishUpload(count: sourceData.count)
+    }
+
+    private func performUpload(_ sourceData: [Data]) async {
         do {
-            let normalizer = ImageNormalizer()
-            let normalized = try sourceData.map { try normalizer.normalize($0) }
+            // Normalising megapixel images is CPU work; keeping it off the main actor
+            // leaves the window responsive while the thumbnails show them arriving.
+            let normalized = try await Self.normalize(sourceData)
             await applyAttachments(try Self.mergedAttachments(existing: attachments, incoming: normalized))
         } catch { errorMessage = Self.attachmentFailureMessage(for: error) }
+    }
+
+    private static func normalize(_ sourceData: [Data]) async throws -> [NormalizedImage] {
+        try await Task.detached(priority: .userInitiated) {
+            let normalizer = ImageNormalizer()
+            return try sourceData.map { try normalizer.normalize($0) }
+        }.value
     }
 
     public func removeAttachment(at index: Int) async {
@@ -237,12 +274,23 @@ public final class AppModel: ObservableObject {
         guard !paste.deleted else { return }
         currentPasteID = paste.id
         draft = paste.text ?? ""
+        savedDraft = draft
         attachments = session?.cachedAttachments(for: paste) ?? []
     }
 
-    public func startNewPaste() {
+    /// Commits whatever is on screen. Called before a new paste begins, when the window
+    /// closes, and on quit, so work is never lost without a Save button.
+    public func saveIfNeeded() async {
+        guard hasUnsavedWork else { return }
+        await saveDraft()
+    }
+
+    /// Opening a new paste commits whatever is on screen, so nothing is lost without a Save button.
+    public func startNewPaste() async {
+        await saveIfNeeded()
         currentPasteID = nil
         draft = ""
+        savedDraft = ""
         attachments = []
     }
 
@@ -328,7 +376,20 @@ public final class AppModel: ObservableObject {
         guard let session, let currentPasteID else { return }
         let resolvedID = session.resolvedPasteID(currentPasteID)
         guard let paste = history.first(where: { $0.id == resolvedID }) else { return }
-        attachments = session.cachedAttachments(for: paste)
+        applyCachedAttachments(session.cachedAttachments(for: paste), recordedCount: paste.attachments.count)
+    }
+
+    /// A cache miss means the bytes have not landed yet, not that the paste lost its images,
+    /// so a refresh that arrives mid-upload must not empty the strip.
+    func applyCachedAttachments(_ cached: [NormalizedImage], recordedCount: Int) {
+        if cached.isEmpty && recordedCount > 0 { return }
+        attachments = cached
+    }
+
+    /// Attachment writes replace the whole set server-side, so two uploads in flight would
+    /// clobber each other. They run one at a time instead.
+    func serializeAttachmentWork(_ work: @escaping () async -> Void) async {
+        await attachmentGate.run(work)
     }
 
     private func refreshSessionReportingError() async {
