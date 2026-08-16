@@ -13,39 +13,75 @@ struct ContentWindowView: View {
             HistorySidebar(model: model)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 232, max: 320)
         } detail: {
-            EditorDetail(model: model)
+            EditorDetail(model: model, isDropTargeted: $isDropTargeted)
         }
         .navigationTitle("MCPaste")
         .frame(minWidth: 720, minHeight: 460)
         .overlay {
             if isDropTargeted { DropTargetOverlay() }
         }
-        .onDrop(of: [UTType.image.identifier], isTargeted: $isDropTargeted) { providers in
-            handleImageProviders(providers)
+        .onDrop(of: DroppedContent.acceptedTypes.map(\.rawValue), isTargeted: $isDropTargeted) { providers in
+            handleProviders(providers)
             return true
         }
-        .onPasteCommand(of: [UTType.image.identifier]) { providers in handleImageProviders(providers) }
+        .onAppear {
+            ImagePasteMonitor.shared.subscribe(
+                paste: { images in Task { await model.uploadImages(images) } },
+                newPaste: { Task { await model.startNewPaste() } }
+            )
+        }
+        .onDisappear {
+            ImagePasteMonitor.shared.unsubscribe()
+            Task { await model.saveIfNeeded() }
+        }
     }
 
-    private func handleImageProviders(_ providers: [NSItemProvider]) {
+    /// A drop anywhere in the window: images attach, text lands in the editor.
+    private func handleProviders(_ providers: [NSItemProvider]) {
         Task {
-            let data = await loadImageData(from: providers)
-            if !data.isEmpty { await model.uploadImages(data) }
+            var images: [Data] = []
+            var text = ""
+            for provider in providers {
+                if let data = await load(provider, as: UTType.image.identifier) {
+                    images.append(data)
+                } else if let url = await loadFileURL(provider) {
+                    if let data = imageData(at: url) {
+                        images.append(data)
+                    } else if let contents = try? String(contentsOf: url, encoding: .utf8) {
+                        text += contents
+                    }
+                } else if let data = await load(provider, as: UTType.utf8PlainText.identifier),
+                          let contents = String(data: data, encoding: .utf8) {
+                    text += contents
+                }
+            }
+            if !images.isEmpty { await model.uploadImages(images) }
+            if !text.isEmpty { model.draft += text }
         }
     }
 
-    private func loadImageData(from providers: [NSItemProvider]) async -> [Data] {
-        var result: [Data] = []
-        for provider in providers {
-            if let data = await loadData(from: provider) { result.append(data) }
-        }
-        return result
+    private func imageData(at url: URL) -> Data? {
+        guard let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image) else { return nil }
+        return try? Data(contentsOf: url)
     }
 
-    private func loadData(from provider: NSItemProvider) async -> Data? {
-        await withCheckedContinuation { continuation in
-            provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+    private func load(_ provider: NSItemProvider, as identifier: String) async -> Data? {
+        guard provider.hasItemConformingToTypeIdentifier(identifier) else { return nil }
+        return await withCheckedContinuation { continuation in
+            provider.loadDataRepresentation(forTypeIdentifier: identifier) { data, _ in
                 continuation.resume(returning: data)
+            }
+        }
+    }
+
+    private func loadFileURL(_ provider: NSItemProvider) async -> URL? {
+        guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else { return nil }
+        return await withCheckedContinuation { continuation in
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
+                guard let data, let text = String(data: data, encoding: .utf8) else {
+                    return continuation.resume(returning: nil)
+                }
+                continuation.resume(returning: URL(string: text))
             }
         }
     }
@@ -176,6 +212,7 @@ private struct DeviceFooter: View {
 
 private struct EditorDetail: View {
     @ObservedObject var model: AppModel
+    @Binding var isDropTargeted: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -187,7 +224,7 @@ private struct EditorDetail: View {
                 }
                 Divider()
             }
-            PasteEditor(model: model)
+            PasteEditor(model: model, isDropTargeted: $isDropTargeted)
             Divider()
             AttachmentStrip(model: model)
             Divider()
@@ -208,12 +245,11 @@ private struct DetailHeader: View {
             Spacer()
             StatusPill(text: syncText, color: syncColor)
             Button {
-                model.startNewPaste()
+                Task { await model.startNewPaste() }
             } label: {
                 Image(systemName: "square.and.pencil")
             }
             .help("New paste (⌘N)")
-            .keyboardShortcut("n", modifiers: .command)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
@@ -268,16 +304,14 @@ private struct ErrorBanner: View {
 
 private struct PasteEditor: View {
     @ObservedObject var model: AppModel
+    @Binding var isDropTargeted: Bool
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            TextEditor(text: $model.draft)
-                .font(.system(size: 12, design: .monospaced))
-                .scrollContentBackground(.hidden)
-                .background(Color(nsColor: .textBackgroundColor))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 10)
-                .accessibilityLabel("Paste text")
+            PasteTextEditor(text: $model.draft, isDropTargeted: $isDropTargeted) { images in
+                Task { await model.uploadImages(images) }
+            }
+            .accessibilityLabel("Paste text")
             if model.draft.isEmpty {
                 Text("Write or paste text here…")
                     .font(.system(size: 12, design: .monospaced))
@@ -301,17 +335,46 @@ private struct AttachmentStrip: View {
                 AttachmentThumbnail(image: image) {
                     Task { await model.removeAttachment(at: index) }
                 }
+                .disabled(model.isUploading)
             }
-            if model.attachments.count < ImageNormalizer.maxAttachmentItems {
-                DropHint(empty: model.attachments.isEmpty)
+            ForEach(0..<model.uploadingCount, id: \.self) { _ in
+                ArrivingThumbnail()
+            }
+            if model.attachments.count + model.uploadingCount < ImageNormalizer.maxAttachmentItems {
+                DropHint(empty: model.attachments.isEmpty && !model.isUploading)
             }
             Spacer(minLength: 8)
-            Text("\(model.attachments.count) of \(ImageNormalizer.maxAttachmentItems) images")
+            Text(countLabel)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(model.isUploading ? Color.accentColor : Color.secondary)
+                .animation(.default, value: model.uploadingCount)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
+    }
+
+    private var countLabel: String {
+        if model.isUploading {
+            return model.uploadingCount == 1 ? "Adding 1 image…" : "Adding \(model.uploadingCount) images…"
+        }
+        return "\(model.attachments.count) of \(ImageNormalizer.maxAttachmentItems) images"
+    }
+}
+
+/// Placeholder for an image that has been accepted but is still being prepared or sent.
+private struct ArrivingThumbnail: View {
+    @State private var pulsing = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 5)
+            .fill(.quaternary)
+            .frame(width: 44, height: 32)
+            .overlay(ProgressView().controlSize(.small).scaleEffect(0.7))
+            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.accentColor.opacity(pulsing ? 0.7 : 0.25)))
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { pulsing = true }
+            }
+            .accessibilityLabel("Image being added")
     }
 }
 
@@ -380,16 +443,9 @@ private struct DetailFooter: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
-            Button("Delete", role: .destructive) {
-                Task { await model.deleteCurrentPaste() }
-            }
-            .disabled(!model.canDeleteCurrentPaste)
-            .padding(.trailing, 8)
-            Button("Save") {
-                Task { await model.saveDraft() }
-            }
-            .buttonStyle(.borderedProminent)
-            .keyboardShortcut(.defaultAction)
+            Label(saveState.text, systemImage: saveState.icon)
+                .font(.caption)
+                .foregroundStyle(saveState.tint)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
@@ -398,6 +454,12 @@ private struct DetailFooter: View {
     private var statistics: String {
         let lines = model.draft.isEmpty ? 0 : model.draft.components(separatedBy: "\n").count
         return "Exact text preserved · \(lines) lines · \(model.draft.count) characters"
+    }
+
+    private var saveState: (text: String, icon: String, tint: Color) {
+        if model.pending || model.isUploading { return ("Saving…", "arrow.triangle.2.circlepath", .secondary) }
+        if model.hasUnsavedWork { return ("Saves when you start a new paste", "pencil.circle", .secondary) }
+        return ("Saved", "checkmark.circle", .secondary)
     }
 }
 
@@ -408,7 +470,7 @@ private struct DropTargetOverlay: View {
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [8]))
                 .padding(16)
-            Label("Drop images to attach", systemImage: "photo.badge.plus")
+            Label("Drop images or text", systemImage: "square.and.arrow.down")
                 .font(.title3)
                 .foregroundStyle(Color.accentColor)
         }

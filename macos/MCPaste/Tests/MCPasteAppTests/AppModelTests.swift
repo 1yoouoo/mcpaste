@@ -3,6 +3,12 @@ import AppKit
 import MCPasteCore
 @testable import MCPasteApp
 
+private actor AttachmentOrderRecorder {
+    private var events: [String] = []
+    func record(_ event: String) { events.append(event) }
+    func snapshot() -> [String] { events }
+}
+
 @MainActor
 final class AppModelTests: XCTestCase {
     func testEmptyModelStartsInOnboarding() {
@@ -115,11 +121,11 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(model.syncFailed)
     }
 
-    func testStartNewPasteClearsSelectionAndDraft() {
+    func testStartNewPasteClearsSelectionAndDraft() async {
         let model = AppModel(keychain: isolatedKeychain())
         model.selectPaste(CachedPaste(id: "p1", revisionID: "r1", sequence: 1, text: "hello", deleted: false, expiresAt: Date().addingTimeInterval(3600)))
 
-        model.startNewPaste()
+        await model.startNewPaste()
 
         XCTAssertFalse(model.canDeleteCurrentPaste)
         XCTAssertEqual(model.draft, "")
@@ -159,6 +165,131 @@ final class AppModelTests: XCTestCase {
         let incoming = (7..<9).map { NormalizedImage(mimeType: "image/png", width: 1, height: 1, data: Data([UInt8($0)])) }
 
         XCTAssertThrowsError(try AppModel.mergedAttachments(existing: existing, incoming: incoming))
+    }
+
+    func testUploadReportsProgressBeforeItReachesTheNetwork() async {
+        let model = AppModel(keychain: isolatedKeychain())
+        XCTAssertEqual(model.uploadingCount, 0)
+
+        // No session is installed, so the upload cannot proceed past preparation.
+        await model.uploadImages([Data([0x01])])
+
+        XCTAssertEqual(model.uploadingCount, 0, "progress must be cleared once the attempt ends")
+    }
+
+    func testBeginningAnUploadPublishesTheItemCount() {
+        let model = AppModel(keychain: isolatedKeychain())
+
+        model.beginUpload(count: 3)
+
+        XCTAssertEqual(model.uploadingCount, 3)
+        XCTAssertTrue(model.isUploading)
+    }
+
+    func testFinishingAnUploadClearsTheProgress() {
+        let model = AppModel(keychain: isolatedKeychain())
+        model.beginUpload(count: 2)
+
+        model.finishUpload()
+
+        XCTAssertEqual(model.uploadingCount, 0)
+        XCTAssertFalse(model.isUploading)
+    }
+
+    func testConcurrentUploadsAccumulateAndDrainTogether() {
+        let model = AppModel(keychain: isolatedKeychain())
+
+        model.beginUpload(count: 2)
+        model.beginUpload(count: 1)
+        XCTAssertEqual(model.uploadingCount, 3)
+
+        model.finishUpload(count: 2)
+        XCTAssertEqual(model.uploadingCount, 1)
+        model.finishUpload(count: 1)
+        XCTAssertFalse(model.isUploading)
+    }
+
+    func testAttachmentWorkIsSerialised() async {
+        let model = AppModel(keychain: isolatedKeychain())
+        let order = AttachmentOrderRecorder()
+
+        async let first: Void = model.serializeAttachmentWork {
+            await order.record("first-start")
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            await order.record("first-end")
+        }
+        async let second: Void = model.serializeAttachmentWork {
+            await order.record("second-start")
+            await order.record("second-end")
+        }
+        _ = await (first, second)
+
+        // Which task reaches the gate first is not fixed, but neither may run inside the other.
+        let events = await order.snapshot()
+        XCTAssertEqual(events.count, 4)
+        for name in ["first", "second"] {
+            let start = events.firstIndex(of: "\(name)-start")!
+            XCTAssertEqual(events[start + 1], "\(name)-end",
+                           "\(name) was interrupted by the other upload, so they would clobber each other")
+        }
+    }
+
+    func testRefreshKeepsAttachmentsWhenTheCacheHasNotCaughtUp() {
+        let model = AppModel(keychain: isolatedKeychain())
+        let images = [NormalizedImage(mimeType: "image/png", width: 1, height: 1, data: Data([1]))]
+        model.previewSeed(attachments: images)
+
+        model.applyCachedAttachments([], recordedCount: 1)
+
+        XCTAssertEqual(model.attachments.count, 1, "a cache miss must not erase images the paste still has")
+    }
+
+    func testRefreshClearsAttachmentsWhenThePasteHasNone() {
+        let model = AppModel(keychain: isolatedKeychain())
+        model.previewSeed(attachments: [NormalizedImage(mimeType: "image/png", width: 1, height: 1, data: Data([1]))])
+
+        model.applyCachedAttachments([], recordedCount: 0)
+
+        XCTAssertTrue(model.attachments.isEmpty)
+    }
+
+    func testStartingANewPasteCommitsTheCurrentDraftFirst() async {
+        let model = AppModel(keychain: isolatedKeychain())
+        model.previewSeed(draft: "unsaved words")
+
+        await model.startNewPaste()
+
+        XCTAssertEqual(model.draft, "", "the new paste starts empty")
+        XCTAssertFalse(model.canDeleteCurrentPaste)
+    }
+
+    func testAnEmptyDraftIsNotWorthSaving() {
+        let model = AppModel(keychain: isolatedKeychain())
+        model.previewSeed(draft: "   \n  ")
+
+        XCTAssertFalse(model.hasUnsavedWork, "whitespace alone is not a paste")
+    }
+
+    func testTypedTextCountsAsUnsavedWork() {
+        let model = AppModel(keychain: isolatedKeychain())
+        model.previewSeed(draft: "something")
+
+        XCTAssertTrue(model.hasUnsavedWork)
+    }
+
+    func testAttachmentsAloneCountAsUnsavedWork() {
+        let model = AppModel(keychain: isolatedKeychain())
+        model.previewSeed(attachments: [NormalizedImage(mimeType: "image/png", width: 1, height: 1, data: Data([1]))])
+
+        XCTAssertTrue(model.hasUnsavedWork, "an image-only paste still needs saving")
+    }
+
+    func testSavingIsSkippedWhenNothingChangedSinceTheLastSave() async {
+        let model = AppModel(keychain: isolatedKeychain())
+        model.previewSeed(draft: "words")
+        model.markDraftSaved()
+
+        XCTAssertFalse(model.hasUnsavedWork, "a draft that matches what was stored needs no write")
     }
 
     private func isolatedKeychain() -> KeychainStore {
