@@ -13,7 +13,7 @@ The connector is read-only and must be configured with a connector credential, n
 
 ## macOS artifact
 
-The macOS release workflow runs Swift tests, archives with Developer ID signing, submits for notarization, staples the result, and publishes a checksum:
+The macOS release workflow runs Swift tests, archives with Developer ID signing, submits for notarization, staples the result, and publishes a checksum. The app bundle embeds the connector CLI at `Contents/Helpers/mcpaste` (built for `darwin/arm64` with the release endpoint baked in and signed with the same identity as the app); the app uses it to pair the Mac and register AI tools on first launch, and the install script links it to `/usr/local/bin/mcpaste`. It lives in `Contents/Helpers` because `Contents/MacOS/mcpaste` would collide with the `MCPaste` app binary on case-insensitive filesystems:
 
 ```sh
 codesign --verify --deep --strict --verbose=2 /Applications/MCPaste.app

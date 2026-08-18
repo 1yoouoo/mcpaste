@@ -6,34 +6,51 @@ MCPaste is a macOS menu bar app that deliberately hands plain text and static im
 
 ## Install
 
-Works on macOS and Linux (`amd64`/`arm64`).
+### macOS — one app for every Mac
 
-With Homebrew:
+Every Mac gets the same MCPaste.app, whether it is the Mac in front of you or a remote Mac you also use directly (a Mac mini at home, for example):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/1yoouoo/mcpaste/main/install.sh | sh
+```
+
+The installer downloads MCPaste.app from [GitHub Releases](https://github.com/1yoouoo/mcpaste/releases/latest), verifies its checksum, installs it to `/Applications`, and links the embedded CLI to `/usr/local/bin/mcpaste`. Open the app once: on first launch it pairs the Mac and automatically registers `mcpaste` as an MCP server with Codex and Claude Code — no terminal steps.
+
+Install through the terminal, not a browser: current releases are ad-hoc signed (not notarized), which runs cleanly when fetched with `curl` but is blocked by Gatekeeper when downloaded with a browser. Manual downloads and checksum verification are documented in [Releases](docs/releases.md).
+
+### Linux — read-only connector CLI
+
+Headless Linux machines get the `mcpaste` CLI only (`amd64`/`arm64`). With Homebrew (Homebrew ships only the CLI on macOS too, because Homebrew quarantines cask downloads, which Gatekeeper blocks for an ad-hoc-signed app):
 
 ```sh
 brew tap 1yoouoo/mcpaste
 brew install mcpaste
 ```
 
-Or without Homebrew — the installer downloads the prebuilt `mcpaste` CLI from [GitHub Releases](https://github.com/1yoouoo/mcpaste/releases/latest), verifies its checksum, and installs it to `/usr/local/bin/mcpaste`:
+Or with the same installer, which places the checksum-verified CLI at `/usr/local/bin/mcpaste`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/1yoouoo/mcpaste/main/install.sh | sh
 ```
 
-On macOS, the menu bar app (the full read/write interface) is installed with the installer's `--app` flag — Homebrew ships only the CLI, because Homebrew quarantines cask downloads, which Gatekeeper blocks for an ad-hoc-signed app:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/1yoouoo/mcpaste/main/install.sh | sh -s -- --app
-```
-
-Install the app through the terminal, not a browser: current releases are ad-hoc signed (not notarized), which runs cleanly when fetched with `curl` but is blocked by Gatekeeper when downloaded with a browser. Manual downloads and checksum verification are documented in [Releases](docs/releases.md).
+After installing on Linux, pair the machine manually with `mcpaste setup` (see below).
 
 The MCPaste service endpoint is baked into the release binary at build time, so `go install github.com/...` does not produce a working binary; build from source with the `-ldflags` recipe under [Development prerequisites](#development-prerequisites) instead.
 
 ## Usage
 
-### 1. Pair the machine (once per machine)
+### 1. macOS: open the app (that's it)
+
+Open MCPaste.app. On first launch the app pairs the Mac and configures the AI tools by itself, using the CLI embedded in the app bundle:
+
+- It stores a read-only connector credential in `$XDG_CONFIG_HOME/mcpaste/credential.json` (default `~/.config/mcpaste/credential.json`).
+- It registers `mcpaste` as an MCP server in every AI tool configuration it detects:
+  - Codex: `~/.codex/config.toml`
+  - Claude Code: `~/.claude.json`
+
+If neither AI tool is configured yet, the app shows "AI tools connect automatically once Codex or Claude Code is installed." and retries on the next launch. Restart the AI tool after the first registration so it picks up the new MCP server.
+
+### 1b. Linux: pair the machine manually (once per machine)
 
 ```sh
 mcpaste setup --name my-machine
@@ -44,12 +61,7 @@ mcpaste setup --name my-machine
 - **GUI**: MCPaste menu bar icon → Workspace & devices → Approve a device → enter the code.
 - **Terminal (macOS only)**: `mcpaste approve <code>`.
 
-On approval, `setup` stores a read-only connector credential in `$XDG_CONFIG_HOME/mcpaste/credential.json` (default `~/.config/mcpaste/credential.json`) and automatically registers `mcpaste` as an MCP server in every AI tool configuration it detects:
-
-- Codex: `~/.codex/config.toml` (override with `--codex-config` or `CODEX_CONFIG_PATH`)
-- Claude Code: `~/.claude.json` (override with `--claude-config` or `CLAUDE_CONFIG_PATH`)
-
-If neither configuration exists, `setup` fails with `no Codex or Claude Code configuration detected` — start the AI tool once first, or pass an explicit config path. Restart the AI tool after setup so it picks up the new MCP server.
+On approval, `setup` stores the connector credential and registers the AI tools exactly like the macOS first launch above (config paths can be overridden with `--codex-config`/`CODEX_CONFIG_PATH` and `--claude-config`/`CLAUDE_CONFIG_PATH`). If neither configuration exists, `setup` fails with `no Codex or Claude Code configuration detected` — start the AI tool once first, or pass an explicit config path.
 
 ### 2. Use it from the AI tool
 
@@ -72,6 +84,7 @@ mcpaste approve <short-code>  # from then on, approve any device without the GUI
 |---|---|---|
 | `mcpaste` | Run the read-only STDIO MCP proxy (used by AI tools) | — |
 | `mcpaste setup` | Pair as a read-only connector and register with detected AI tools | `--name`, `--credential-file`, `--codex-config`, `--claude-config` |
+| `mcpaste register` | Re-register with detected AI tools using the existing credential (the app runs this on every launch) | `--credential-file`, `--codex-config`, `--claude-config` |
 | `mcpaste login` | Pair as a full admin device (macOS only) | `--name`, `--credential-file` |
 | `mcpaste approve <short-code>` | Approve a pending pairing request | `--credential-file` |
 

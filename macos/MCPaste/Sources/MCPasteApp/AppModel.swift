@@ -34,6 +34,7 @@ public final class AppModel: ObservableObject {
     /// A pairing request looked up by code and awaiting the user's approve/deny.
     @Published public private(set) var pendingApproval: PairingDetails?
     @Published public private(set) var pairingNotice: String?
+    @Published public private(set) var connectorNotice: String?
 
     public var isUploading: Bool { uploadingCount > 0 }
 
@@ -118,9 +119,44 @@ public final class AppModel: ObservableObject {
             }
             try await installSession(workspaceID: credential.workspaceID, deviceID: credential.deviceID, endpoint: url, token: credential.token)
             screen = .pasteboard
+            configureConnectorInBackground()
             await session?.replayPending()
             try await refreshSession()
         } catch { errorMessage = "Saved workspace could not be restored." }
+    }
+
+    // MARK: This Mac's own AI-tool connector, set up through the embedded CLI.
+
+    private var connectorSetupStarted = false
+
+    private func configureConnectorInBackground() {
+        guard !connectorSetupStarted else { return }
+        connectorSetupStarted = true
+        Task { await configureConnector() }
+    }
+
+    func configureConnector() async {
+        guard let pairingAPI else { return }
+        guard let cliURL = ConnectorSetup.embeddedCLIURL() else { return }
+        let setup = ConnectorSetup(
+            cliURL: cliURL,
+            credentialURL: ConnectorSetup.credentialFileURL(),
+            deviceName: deviceName
+        )
+        let outcome = await setup.run { code in
+            let details = try await pairingAPI.lookupPairing(shortCode: code)
+            _ = try await pairingAPI.approvePairing(id: details.pairingID, idempotencyKey: UUID().uuidString.lowercased())
+        }
+        switch outcome {
+        case .configured:
+            connectorNotice = nil
+            try? await session?.refreshDevices()
+            devices = session?.devices ?? devices
+        case .noAITools:
+            connectorNotice = "AI tools connect automatically once Codex or Claude Code is installed."
+        case .failed:
+            connectorNotice = "AI tool setup did not finish. It retries on the next launch."
+        }
     }
 
     public func saveDraft() async {
@@ -415,6 +451,7 @@ public final class AppModel: ObservableObject {
         try await installSession(workspaceID: grant.workspaceID, deviceID: grant.deviceID, endpoint: endpoint, token: token)
         try await refreshSession()
         screen = showsRecovery ? .recovery : .pasteboard
+        configureConnectorInBackground()
     }
 
     private func installSession(workspaceID: String, deviceID: String, endpoint: URL, token: String) async throws {

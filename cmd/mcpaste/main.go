@@ -37,6 +37,8 @@ func run(ctx context.Context, args []string) error {
 			return runLogin(ctx, args[1:])
 		case "approve":
 			return runApprove(ctx, args[1:])
+		case "register":
+			return runRegister(args[1:])
 		}
 		return runProxy(ctx, args)
 	}
@@ -130,6 +132,42 @@ func runSetupWithEndpoint(ctx context.Context, mcpEndpoint, name, credentialPath
 	}
 	if err := connector.ConfigureClients(connector.ClientConfigOptions{
 		CommandPath: commandPath, CodexPath: codexPath, ClaudePath: claudePath,
+	}); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintln(os.Stdout, "mcpaste connector configured")
+	return nil
+}
+
+// runRegister re-registers this executable as an MCP server in the detected AI
+// tool configurations without pairing again. The macOS app runs it on launch so
+// AI tools installed after `mcpaste setup` are picked up.
+func runRegister(args []string) error {
+	flags := flag.NewFlagSet("mcpaste register", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	credentialPath := flags.String("credential-file", "", "credential file")
+	codexPath := flags.String("codex-config", "", "Codex configuration path")
+	claudePath := flags.String("claude-config", "", "Claude Code configuration path")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return errors.New("invalid register arguments")
+	}
+	path := *credentialPath
+	if path == "" {
+		var err error
+		path, err = connector.DefaultCredentialPath()
+		if err != nil {
+			return err
+		}
+	}
+	if _, err := connector.LoadCredential(path); err != nil {
+		return errors.New("no connector credential; run `mcpaste setup` first")
+	}
+	commandPath, err := os.Executable()
+	if err != nil {
+		return errors.New("resolve mcpaste executable")
+	}
+	if err := connector.ConfigureClients(connector.ClientConfigOptions{
+		CommandPath: commandPath, CodexPath: *codexPath, ClaudePath: *claudePath,
 	}); err != nil {
 		return err
 	}

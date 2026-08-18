@@ -121,6 +121,7 @@ private struct StatusHome: View {
     private var noticeMessage: String? {
         if let errorMessage = model.errorMessage { return errorMessage }
         if model.syncFailed { return "Sync is unavailable. The app keeps retrying." }
+        if let connectorNotice = model.connectorNotice { return connectorNotice }
         return nil
     }
 

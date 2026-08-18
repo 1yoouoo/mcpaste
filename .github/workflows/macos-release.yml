@@ -32,6 +32,11 @@ jobs:
           persist-credentials: false
       - name: Select Xcode
         run: sudo xcode-select --switch /Applications/Xcode_15.4.app
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: .go-version
+          cache: false
       - name: Test package
         working-directory: macos/MCPaste
         run: |
@@ -68,7 +73,13 @@ jobs:
           cp "$bin_path/MCPaste" "$app/Contents/MacOS/MCPaste"
           cp -R "$bin_path/MCPaste_MCPasteApp.bundle" "$app/Contents/Resources/"
           cp Resources/Info.plist "$app/Contents/Info.plist"
+          # Embed the connector CLI so the app can pair and register AI tools
+          # itself. It goes in Contents/Helpers: Contents/MacOS/mcpaste would
+          # overwrite the MCPaste app binary on case-insensitive filesystems.
+          mkdir -p "$app/Contents/Helpers"
+          (cd "$GITHUB_WORKSPACE" && GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X=github.com/1yoouoo/mcpaste/internal/connector.BuildEndpoint=$MCPASTE_ENDPOINT" -o "$app/Contents/Helpers/mcpaste" ./cmd/mcpaste)
           if [ -n "$SIGNING_IDENTITY" ]; then
+            codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app/Contents/Helpers/mcpaste"
             codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app"
             ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/MCPaste.zip"
             xcrun notarytool submit "$RUNNER_TEMP/MCPaste.zip" --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
@@ -78,6 +89,7 @@ jobs:
             # No Apple credentials: ad-hoc sign. Terminal (curl) downloads carry no
             # quarantine attribute, so Gatekeeper never evaluates the app; browser
             # downloads of this artifact are blocked as unverified.
+            codesign --force --sign - "$app/Contents/Helpers/mcpaste"
             codesign --force --deep --sign - "$app"
             artifact=MCPaste-adhoc.zip
           fi
