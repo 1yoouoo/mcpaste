@@ -31,6 +31,23 @@ The production MVP is one DigitalOcean Droplet with Caddy, the Go service, and P
 
 Static images are normalized on macOS, encrypted on the server, retained for 24 hours, and returned to the read-only MCP tool as ordered image blocks. Text revisions remain immutable and are retained for one year.
 
+## Install the read-only connector (Linux)
+
+Download the prebuilt binary from [GitHub Releases](https://github.com/1yoouoo/mcpaste/releases/latest), verify its checksum, and pair it:
+
+```sh
+arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac
+curl -fsSLO "https://github.com/1yoouoo/mcpaste/releases/latest/download/mcpaste-$arch"
+curl -fsSLO "https://github.com/1yoouoo/mcpaste/releases/latest/download/Linux-SHA256SUMS"
+grep " mcpaste-$arch\$" Linux-SHA256SUMS | sha256sum -c -
+chmod +x "mcpaste-$arch" && sudo mv "mcpaste-$arch" /usr/local/bin/mcpaste
+mcpaste setup --name my-machine
+```
+
+`mcpaste setup` prints a pairing code and waits. Approve that code from a full device: the MCPaste menu bar app (Workspace & devices → Approve a device), or `mcpaste approve <code>` from a terminal that has run `mcpaste login` once. The service endpoint is baked into the release binary, so `go install` builds do not work; build from source with the `-ldflags` recipe below instead.
+
+The macOS menu bar app is attached to the same release as a notarized archive with `macOS-SHA256SUMS`; verification steps are in [Releases](docs/releases.md).
+
 ## Development prerequisites
 
 - Go version from `.go-version`
