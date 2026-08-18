@@ -24,7 +24,9 @@ shasum -a 256 --check macOS-SHA256SUMS
 
 The macOS release also publishes `macOS-SHA256SUMS` and `THIRD_PARTY_NOTICES.md`.
 
-Apple Developer membership, a Developer ID identity, notarization credentials, and the protected release environment are owner prerequisites. They are never stored in this repository.
+When the signing secrets are not configured, the workflow falls back to an ad-hoc signature and publishes `MCPaste-adhoc.zip` instead of `MCPaste-final.zip`. The ad-hoc app is not notarized: it must be downloaded with `curl` (or the install script), because a browser download is quarantined and blocked by Gatekeeper. Configuring the Apple secrets in the `release` environment restores the signed and notarized artifact with no workflow change.
+
+Apple Developer membership, a Developer ID identity, notarization credentials, and the protected release environment are owner prerequisites for the notarized artifact. They are never stored in this repository.
 
 The Linux tag workflow publishes the GitHub release first and then invokes the reusable macOS workflow with the same `v*` tag. A manual macOS run also requires an existing `v*` tag; it never uploads artifacts to a branch-named release.
 

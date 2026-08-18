@@ -6,22 +6,21 @@ MCPaste is a macOS menu bar app that deliberately hands plain text and static im
 
 ## Install
 
-Works on macOS and Linux (`amd64`/`arm64`). Requires `curl` and either `sha256sum` or `shasum`. This downloads the prebuilt `mcpaste` CLI from [GitHub Releases](https://github.com/1yoouoo/mcpaste/releases/latest), verifies its checksum, and installs it to `/usr/local/bin/mcpaste`:
+Works on macOS and Linux (`amd64`/`arm64`). The installer downloads the prebuilt `mcpaste` CLI from [GitHub Releases](https://github.com/1yoouoo/mcpaste/releases/latest), verifies its checksum, and installs it to `/usr/local/bin/mcpaste`:
 
 ```sh
-arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac
-asset="mcpaste-$arch"; sums="Linux-SHA256SUMS"
-if [ "$(uname -s)" = Darwin ]; then asset="mcpaste-darwin-$arch"; sums="Darwin-SHA256SUMS"; fi
-curl -fsSLO "https://github.com/1yoouoo/mcpaste/releases/latest/download/$asset"
-curl -fsSLO "https://github.com/1yoouoo/mcpaste/releases/latest/download/$sums"
-checker=sha256sum; command -v sha256sum >/dev/null 2>&1 || checker='shasum -a 256'
-grep " $asset\$" "$sums" | $checker -c -
-chmod +x "$asset" && sudo mv "$asset" /usr/local/bin/mcpaste
+curl -fsSL https://raw.githubusercontent.com/1yoouoo/mcpaste/main/install.sh | sh
 ```
 
-The MCPaste service endpoint is baked into the release binary at build time, so `go install github.com/...` does not produce a working binary; build from source with the `-ldflags` recipe under [Development prerequisites](#development-prerequisites) instead.
+On macOS, add `--app` to also install the menu bar app (the full read/write interface) to `/Applications`:
 
-The macOS menu bar app (the full read/write interface) is attached to the same release as the notarized `MCPaste-final.zip` with `macOS-SHA256SUMS`; unzip it and move `MCPaste.app` to `/Applications`. Verification steps are in [Releases](docs/releases.md).
+```sh
+curl -fsSL https://raw.githubusercontent.com/1yoouoo/mcpaste/main/install.sh | sh -s -- --app
+```
+
+Install the app through the terminal, not a browser: current releases are ad-hoc signed (not notarized), which runs cleanly when fetched with `curl` but is blocked by Gatekeeper when downloaded with a browser. Manual downloads and checksum verification are documented in [Releases](docs/releases.md).
+
+The MCPaste service endpoint is baked into the release binary at build time, so `go install github.com/...` does not produce a working binary; build from source with the `-ldflags` recipe under [Development prerequisites](#development-prerequisites) instead.
 
 ## Usage
 
