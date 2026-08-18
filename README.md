@@ -6,13 +6,22 @@ MCPaste is a macOS menu bar app that deliberately hands plain text and static im
 
 ## Install
 
-Works on macOS and Linux (`amd64`/`arm64`). The installer downloads the prebuilt `mcpaste` CLI from [GitHub Releases](https://github.com/1yoouoo/mcpaste/releases/latest), verifies its checksum, and installs it to `/usr/local/bin/mcpaste`:
+Works on macOS and Linux (`amd64`/`arm64`).
+
+With Homebrew:
+
+```sh
+brew tap 1yoouoo/mcpaste
+brew install mcpaste
+```
+
+Or without Homebrew — the installer downloads the prebuilt `mcpaste` CLI from [GitHub Releases](https://github.com/1yoouoo/mcpaste/releases/latest), verifies its checksum, and installs it to `/usr/local/bin/mcpaste`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/1yoouoo/mcpaste/main/install.sh | sh
 ```
 
-On macOS, add `--app` to also install the menu bar app (the full read/write interface) to `/Applications`:
+On macOS, the menu bar app (the full read/write interface) is installed with the installer's `--app` flag — Homebrew ships only the CLI, because Homebrew quarantines cask downloads, which Gatekeeper blocks for an ad-hoc-signed app:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/1yoouoo/mcpaste/main/install.sh | sh -s -- --app
