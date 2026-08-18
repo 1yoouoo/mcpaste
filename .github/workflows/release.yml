@@ -34,6 +34,12 @@ jobs:
           go run github.com/google/go-licenses@v1.6.0 save ./... --ignore github.com/1yoouoo/mcpaste --save_path "$RUNNER_TEMP/THIRD_PARTY_LICENSES"
           tar -czf dist/THIRD_PARTY_LICENSES.tar.gz -C "$RUNNER_TEMP" THIRD_PARTY_LICENSES
           (cd dist && shasum -a 256 * > Linux-SHA256SUMS)
+      - name: Build macOS CLI artifacts
+        run: |
+          for arch in amd64 arm64; do
+            GOOS=darwin GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X=github.com/1yoouoo/mcpaste/internal/connector.BuildEndpoint=$MCPASTE_ENDPOINT" -o "dist/mcpaste-darwin-$arch" ./cmd/mcpaste
+          done
+          (cd dist && shasum -a 256 mcpaste-darwin-amd64 mcpaste-darwin-arm64 > Darwin-SHA256SUMS)
       - name: Publish verified release
         env:
           GH_TOKEN: ${{ github.token }}

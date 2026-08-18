@@ -95,7 +95,7 @@ func runSetupWithEndpoint(ctx context.Context, mcpEndpoint, name, credentialPath
 		return err
 	}
 	apiBase := strings.TrimSuffix(mcpEndpoint, "/v1/mcp")
-	pairing, err := createPairingRequest(ctx, apiBase, name, "linux", "connector")
+	pairing, err := createPairingRequest(ctx, apiBase, name, runtimePlatform(), "connector")
 	if err != nil {
 		return err
 	}
@@ -152,11 +152,7 @@ func runLogin(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	platform := "linux"
-	if runtime.GOOS == "darwin" {
-		platform = "macos"
-	}
-	return runLoginWithEndpoint(ctx, mcpEndpoint, *name, platform, *credentialPath)
+	return runLoginWithEndpoint(ctx, mcpEndpoint, *name, runtimePlatform(), *credentialPath)
 }
 
 func runLoginWithEndpoint(ctx context.Context, mcpEndpoint, name, platform, credentialPath string) error {
@@ -236,6 +232,15 @@ func runApprove(ctx context.Context, args []string) error {
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "approved %s (%s, %s)\n", details.ProposedName, details.Platform, details.RequestedScope)
 	return nil
+}
+
+// runtimePlatform reports this machine as one of the platforms the pairing API
+// accepts; the server only grants full scope to macos.
+func runtimePlatform() string {
+	if runtime.GOOS == "darwin" {
+		return "macos"
+	}
+	return "linux"
 }
 
 func defaultAdminCredentialPath() (string, error) {

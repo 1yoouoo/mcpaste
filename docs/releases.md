@@ -2,7 +2,7 @@
 
 ## Linux artifacts
 
-Tagged releases build `mcpaste`, `mcpaste-server`, and `mcpaste-migrate` for Linux `amd64` and `arm64`, plus `Linux-SHA256SUMS` and a generated `THIRD_PARTY_LICENSES.tar.gz`:
+Tagged releases build `mcpaste`, `mcpaste-server`, and `mcpaste-migrate` for Linux `amd64` and `arm64`, plus `Linux-SHA256SUMS` and a generated `THIRD_PARTY_LICENSES.tar.gz`. The same job also builds the CLI-only `mcpaste-darwin-amd64` and `mcpaste-darwin-arm64` (unsigned, verified through `Darwin-SHA256SUMS`; the signed and notarized artifact is the macOS app below):
 
 ```sh
 sha256sum --check Linux-SHA256SUMS
