@@ -34,7 +34,11 @@ private struct MenuBarLabel: View {
     }
 
     private func openContentWindowIfReady() {
-        if model.screen == .pasteboard { openWindow(id: "content") }
+        guard model.screen == .pasteboard else { return }
+        ContentWindowOpener.open(
+            openWindow: { openWindow(id: "content") },
+            activate: ContentWindowOpener.activateApp
+        )
     }
 }
 

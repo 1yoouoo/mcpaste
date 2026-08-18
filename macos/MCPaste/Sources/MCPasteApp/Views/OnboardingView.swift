@@ -8,8 +8,6 @@ struct OnboardingView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PopoverHeader(title: "MCPaste") { EmptyView() }
-            Divider()
             switch route {
             case .start:
                 StartPane(model: model) { route = $0 }

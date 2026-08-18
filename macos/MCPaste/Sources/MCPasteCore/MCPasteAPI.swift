@@ -26,7 +26,15 @@ public protocol DeviceAPI: AnyObject {
     func revokeDevice(id: String, idempotencyKey: String) async throws
 }
 
-public final class MCPasteAPI: WorkspaceAPI, DeviceAPI {
+/// The approving side of device pairing: a full device looks up the code another
+/// device printed, then approves or denies its request to join the workspace.
+public protocol PairingAdminAPI: AnyObject {
+    func lookupPairing(shortCode: String) async throws -> PairingDetails
+    func approvePairing(id: String, idempotencyKey: String) async throws -> ApprovalRecord
+    func denyPairing(id: String, idempotencyKey: String) async throws -> PairingStatusRecord
+}
+
+public final class MCPasteAPI: WorkspaceAPI, DeviceAPI, PairingAdminAPI {
     public let baseURL: URL
     public let token: String
     private let session: URLSession

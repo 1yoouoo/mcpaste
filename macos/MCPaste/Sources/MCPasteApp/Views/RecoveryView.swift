@@ -6,9 +6,6 @@ struct RecoveryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PopoverHeader(title: "Recovery code") { EmptyView() }
-            Divider()
-
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Image(systemName: "key.fill")

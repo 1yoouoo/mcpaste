@@ -50,21 +50,21 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
     }
 
-    func testSelectPasteEnablesDelete() {
+    func testSelectPasteEnablesDelete() async {
         let model = AppModel(keychain: isolatedKeychain())
         let paste = CachedPaste(id: "p1", revisionID: "r1", sequence: 1, text: "hello", deleted: false, expiresAt: Date().addingTimeInterval(3600))
 
-        model.selectPaste(paste)
+        await model.selectPaste(paste)
 
         XCTAssertTrue(model.canDeleteCurrentPaste)
         XCTAssertEqual(model.draft, "hello")
     }
 
-    func testSelectingDeletedPasteDoesNotEnableDelete() {
+    func testSelectingDeletedPasteDoesNotEnableDelete() async {
         let model = AppModel(keychain: isolatedKeychain())
         let paste = CachedPaste(id: "p1", revisionID: "r1", sequence: 1, text: nil, deleted: true, expiresAt: Date().addingTimeInterval(3600))
 
-        model.selectPaste(paste)
+        await model.selectPaste(paste)
 
         XCTAssertFalse(model.canDeleteCurrentPaste)
     }
@@ -123,7 +123,7 @@ final class AppModelTests: XCTestCase {
 
     func testStartNewPasteClearsSelectionAndDraft() async {
         let model = AppModel(keychain: isolatedKeychain())
-        model.selectPaste(CachedPaste(id: "p1", revisionID: "r1", sequence: 1, text: "hello", deleted: false, expiresAt: Date().addingTimeInterval(3600)))
+        await model.selectPaste(CachedPaste(id: "p1", revisionID: "r1", sequence: 1, text: "hello", deleted: false, expiresAt: Date().addingTimeInterval(3600)))
 
         await model.startNewPaste()
 
@@ -132,7 +132,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.attachments.isEmpty)
     }
 
-    func testSelectingImageOnlyPasteOpensItWithEmptyDraft() {
+    func testSelectingImageOnlyPasteOpensItWithEmptyDraft() async {
         let model = AppModel(keychain: isolatedKeychain())
         let paste = CachedPaste(
             id: "p1",
@@ -145,7 +145,7 @@ final class AppModelTests: XCTestCase {
             attachments: [PasteAttachment(assetIndex: 0, mimeType: "image/png", width: 8, height: 8, byteSize: 4, expiresAt: Date().addingTimeInterval(3600))]
         )
 
-        model.selectPaste(paste)
+        await model.selectPaste(paste)
 
         XCTAssertTrue(model.canDeleteCurrentPaste)
         XCTAssertEqual(model.draft, "")

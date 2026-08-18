@@ -97,7 +97,7 @@ private struct HistorySidebar: View {
         VStack(spacing: 0) {
             List(selection: selectionBinding) {
                 if model.history.isEmpty {
-                    Text("No saved pastes yet. Write something and press Save.")
+                    Text(EditorStatus.emptyHistory)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineLimit(nil)
@@ -105,7 +105,7 @@ private struct HistorySidebar: View {
                         .listRowSeparator(.hidden)
                 } else {
                     ForEach(filtered, id: \.id) { paste in
-                        HistoryRow(paste: paste)
+                        HistoryRow(paste: paste, number: model.displayNumber(for: paste))
                             .tag(paste.id)
                     }
                 }
@@ -128,7 +128,7 @@ private struct HistorySidebar: View {
             get: { model.selectedPasteID },
             set: { id in
                 guard let id, let paste = model.history.first(where: { $0.id == id }) else { return }
-                model.selectPaste(paste)
+                Task { await model.selectPaste(paste) }
             }
         )
     }
@@ -136,6 +136,7 @@ private struct HistorySidebar: View {
 
 private struct HistoryRow: View {
     let paste: CachedPaste
+    let number: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -144,7 +145,7 @@ private struct HistoryRow: View {
                 .lineLimit(2)
                 .foregroundStyle(paste.deleted ? .secondary : .primary)
             HStack(spacing: 5) {
-                Text("#\(paste.sequence)")
+                Text("#\(number)")
                 if !paste.attachments.isEmpty {
                     Text("·")
                     Image(systemName: "photo").font(.system(size: 9))
@@ -179,7 +180,7 @@ private struct DeviceFooter: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "laptopcomputer.and.iphone").font(.caption).foregroundStyle(.secondary)
-                    Text(model.devices.isEmpty ? "This Mac" : "\(model.devices.count) devices")
+                    Text(AppModel.deviceCountLabel(for: model.devices))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -240,10 +241,13 @@ private struct DetailHeader: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(.system(size: 13, weight: .semibold))
-                Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                // Recomputed on a schedule so "Synced 12 seconds ago" does not freeze.
+                TimelineView(.periodic(from: .now, by: 10)) { context in
+                    Text(subtitle(now: context.date)).font(.caption).foregroundStyle(.secondary)
+                }
             }
             Spacer()
-            StatusPill(text: syncText, color: syncColor)
+            StatusPill(text: pill.text, color: pill.color)
             Button {
                 Task { await model.startNewPaste() }
             } label: {
@@ -257,25 +261,23 @@ private struct DetailHeader: View {
 
     private var title: String {
         guard let paste = model.selectedPaste else { return "New paste" }
-        return "Paste #\(paste.sequence)"
+        return "Paste #\(model.displayNumber(for: paste))"
     }
 
-    private var subtitle: String {
-        if model.selectedPaste == nil { return "Not saved yet" }
-        guard let date = model.lastSyncedAt else { return "Saved" }
-        return "Synced \(RelativeTime.string(for: date))"
+    private func subtitle(now: Date) -> String {
+        EditorStatus.headerSubtitle(
+            hasSavedSelection: model.selectedPaste != nil,
+            lastSyncedAt: model.lastSyncedAt,
+            now: now
+        )
     }
 
-    private var syncText: String {
-        if model.syncFailed { return "Offline" }
-        if model.pending || model.pendingCount > 0 { return "Syncing" }
-        return model.syncStatus == .notConnected ? "Connecting" : "Synced"
-    }
-
-    private var syncColor: Color {
-        if model.syncFailed { return .red }
-        if model.pending || model.pendingCount > 0 { return .orange }
-        return model.syncStatus == .notConnected ? .secondary : .green
+    private var pill: (text: String, color: Color) {
+        EditorStatus.pill(
+            syncFailed: model.syncFailed,
+            syncing: model.pending || model.pendingCount > 0,
+            connected: model.syncStatus != .notConnected
+        )
     }
 }
 
@@ -457,9 +459,39 @@ private struct DetailFooter: View {
     }
 
     private var saveState: (text: String, icon: String, tint: Color) {
-        if model.pending || model.isUploading { return ("Saving…", "arrow.triangle.2.circlepath", .secondary) }
-        if model.hasUnsavedWork { return ("Saves when you start a new paste", "pencil.circle", .secondary) }
-        return ("Saved", "checkmark.circle", .secondary)
+        let state = EditorStatus.footer(
+            saving: model.pending || model.isUploading,
+            connectorCount: AppModel.mcpConnectorCount(in: model.devices)
+        )
+        return (state.text, state.icon, .secondary)
+    }
+}
+
+/// Pure descriptions of the editor's status line. Everything saves automatically,
+/// so the header and footer report what the user cannot otherwise see: the network
+/// connection and the MCP connectors linked to this workspace.
+enum EditorStatus {
+    static let emptyHistory = "No pastes yet. Write something — it saves automatically."
+
+    static func pill(syncFailed: Bool, syncing: Bool, connected: Bool) -> (text: String, color: Color) {
+        if syncFailed { return ("Offline", .red) }
+        if syncing { return ("Syncing", .orange) }
+        return connected ? ("Online", .green) : ("Connecting", .secondary)
+    }
+
+    static func headerSubtitle(hasSavedSelection: Bool, lastSyncedAt: Date?, now: Date) -> String {
+        guard hasSavedSelection else { return "Saves automatically" }
+        guard let lastSyncedAt else { return "Saved" }
+        return "Synced \(RelativeTime.string(for: lastSyncedAt, now: now))"
+    }
+
+    static func footer(saving: Bool, connectorCount: Int) -> (text: String, icon: String) {
+        if saving { return ("Saving…", "arrow.triangle.2.circlepath") }
+        switch connectorCount {
+        case 0: return ("No MCP connector linked yet", "cable.connector.horizontal")
+        case 1: return ("1 MCP connector linked", "cable.connector.horizontal")
+        default: return ("\(connectorCount) MCP connectors linked", "cable.connector.horizontal")
+        }
     }
 }
 

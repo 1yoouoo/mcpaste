@@ -38,18 +38,21 @@ private struct WorkspaceStatusView: View {
 private struct StatusHome: View {
     @ObservedObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismiss) private var dismiss
     let showWorkspace: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            PopoverHeader(title: "MCPaste") {
-                StatusPill(text: connection.title, color: connection.color)
-            }
-
-            Divider()
-
             VStack(spacing: 7) {
-                InfoRow(label: "Last synced", value: lastSyncedText)
+                HStack(spacing: 8) {
+                    Text("Connection").font(.callout).foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    StatusPill(text: connection.title, color: connection.color)
+                }
+                // Recomputed on a schedule so "20 seconds ago" does not freeze while the popover stays open.
+                TimelineView(.periodic(from: .now, by: 10)) { context in
+                    InfoRow(label: "Last synced", value: lastSyncedLabel(for: model.lastSyncedAt, now: context.date))
+                }
                 if model.pendingCount > 0 {
                     InfoRow(label: "Queued", value: queuedText, tint: .orange) {
                         Button("Retry") { Task { await model.retryNow() } }
@@ -57,6 +60,7 @@ private struct StatusHome: View {
                     }
                 }
                 InfoRow(label: "Devices", value: devicesText)
+                InfoRow(label: "MCP", value: mcpText)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -79,16 +83,23 @@ private struct StatusHome: View {
 
             Divider()
 
-            LatestPasteSummary(paste: model.history.first)
+            LatestPasteSummary(
+                paste: model.history.first,
+                number: model.history.first.map { model.displayNumber(for: $0) }
+            )
 
             Divider()
 
             VStack(spacing: 1) {
-                MenuRow(title: "Open Paste Window", shortcut: "⌘N", prominent: true) {
-                    openWindow(id: "content")
+                MenuRow(title: "Open Paste Window", prominent: true) {
+                    ContentWindowOpener.open(
+                        openWindow: { openWindow(id: "content") },
+                        activate: ContentWindowOpener.activateApp,
+                        dismissPopover: { dismiss() }
+                    )
                 }
                 MenuRow(title: "Workspace & devices", chevron: true, action: showWorkspace)
-                MenuRow(title: "Quit MCPaste", shortcut: "⌘Q") {
+                MenuRow(title: "Quit MCPaste") {
                     NSApplication.shared.terminate(nil)
                 }
             }
@@ -113,22 +124,31 @@ private struct StatusHome: View {
         return nil
     }
 
-    private var lastSyncedText: String {
-        guard let date = model.lastSyncedAt else { return "Not yet" }
-        return RelativeTime.string(for: date)
-    }
-
     private var queuedText: String {
         model.pendingCount == 1 ? "1 change" : "\(model.pendingCount) changes"
     }
 
     private var devicesText: String {
-        model.devices.isEmpty ? "This Mac only" : "\(model.devices.count) connected"
+        AppModel.deviceCountLabel(for: model.devices)
     }
+
+    private var mcpText: String {
+        switch AppModel.mcpConnectorCount(in: model.devices) {
+        case 0: return "No connectors"
+        case 1: return "1 connector"
+        case let count: return "\(count) connectors"
+        }
+    }
+}
+
+func lastSyncedLabel(for date: Date?, now: Date) -> String {
+    guard let date else { return "Not yet" }
+    return RelativeTime.string(for: date, now: now)
 }
 
 private struct LatestPasteSummary: View {
     let paste: CachedPaste?
+    let number: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -146,7 +166,7 @@ private struct LatestPasteSummary: View {
                         Text(paste.attachments.count == 1 ? "1 image" : "\(paste.attachments.count) images")
                         Text("·")
                     }
-                    Text("#\(paste.sequence)")
+                    if let number { Text("#\(number)") }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -204,6 +224,10 @@ private struct WorkspaceDetail: View {
                         }
                     }
                 }
+
+                Divider()
+
+                ApproveDeviceSection(model: model)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12)
@@ -224,6 +248,63 @@ private struct WorkspaceDetail: View {
             Button("Cancel", role: .cancel) { revoking = nil }
         } message: {
             Text("It loses access to this workspace immediately.")
+        }
+    }
+}
+
+/// Approves a pairing request another device printed (e.g. `mcpaste setup` on a
+/// connector host): enter its code, review who is asking, then approve or deny.
+private struct ApproveDeviceSection: View {
+    @ObservedObject var model: AppModel
+    @State private var code = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Approve a device").font(.caption).foregroundStyle(.secondary)
+
+            if let request = model.pendingApproval {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(request.proposedName).font(.callout)
+                    Text("\(request.platform) · \(AppModel.pairingScopeLabel(request.requestedScope))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                HStack(spacing: 8) {
+                    Button("Approve") { Task { await model.approvePendingPairing() } }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    Button("Deny") { Task { await model.denyPendingPairing() } }
+                        .controlSize(.small)
+                    Spacer()
+                    Button("Cancel") { model.dismissPairingApproval() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            } else {
+                HStack(spacing: 6) {
+                    TextField("Code from the other device", text: $code)
+                        .textFieldStyle(.roundedBorder)
+                        .controlSize(.small)
+                        .onSubmit { lookUp() }
+                    Button("Look up") { lookUp() }
+                        .controlSize(.small)
+                        .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+
+            if let notice = model.pairingNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func lookUp() {
+        Task {
+            await model.lookupPairing(shortCode: code)
+            if model.pendingApproval != nil { code = "" }
         }
     }
 }
@@ -252,24 +333,6 @@ private struct DeviceRow: View {
 }
 
 // MARK: - Shared popover pieces
-
-struct PopoverHeader<Accessory: View>: View {
-    let title: String
-    @ViewBuilder var accessory: Accessory
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "doc.on.clipboard.fill")
-                .foregroundStyle(Color.accentColor)
-            Text(title).font(.system(size: 13, weight: .semibold))
-            Spacer()
-            accessory
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-    }
-}
 
 struct StatusPill: View {
     let text: String
@@ -311,7 +374,6 @@ extension InfoRow where Accessory == EmptyView {
 
 struct MenuRow: View {
     let title: String
-    var shortcut: String? = nil
     var prominent = false
     var chevron = false
     let action: () -> Void
@@ -324,9 +386,6 @@ struct MenuRow: View {
                     .font(.callout)
                     .fontWeight(prominent ? .semibold : .regular)
                 Spacer()
-                if let shortcut {
-                    Text(shortcut).font(.callout).foregroundStyle(.tertiary)
-                }
                 if chevron {
                     Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
                 }

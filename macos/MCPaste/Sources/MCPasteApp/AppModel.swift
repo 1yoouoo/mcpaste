@@ -31,6 +31,9 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var syncFailed = false
     /// Images accepted but not yet stored, so the window can show them arriving.
     @Published public private(set) var uploadingCount = 0
+    /// A pairing request looked up by code and awaiting the user's approve/deny.
+    @Published public private(set) var pendingApproval: PairingDetails?
+    @Published public private(set) var pairingNotice: String?
 
     public var isUploading: Bool { uploadingCount > 0 }
 
@@ -54,7 +57,8 @@ public final class AppModel: ObservableObject {
         return history.first { $0.id == resolvedID }
     }
 
-    private var api: MCPasteAPI?
+    private var api: (any WorkspaceAPI)?
+    private var pairingAPI: (any PairingAdminAPI)?
     private var savedDraft = ""
     private let attachmentGate = SerialGate()
     @Published private var currentPasteID: String?
@@ -270,8 +274,11 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    public func selectPaste(_ paste: CachedPaste) {
+    public func selectPaste(_ paste: CachedPaste) async {
         guard !paste.deleted else { return }
+        // Re-selecting the open paste must not reload it over edits in progress.
+        guard paste.id != selectedPaste?.id else { return }
+        await saveIfNeeded()
         currentPasteID = paste.id
         draft = paste.text ?? ""
         savedDraft = draft
@@ -294,12 +301,104 @@ public final class AppModel: ObservableObject {
         attachments = []
     }
 
+    /// One phrase for every device count in the UI. Counts companion devices,
+    /// not list rows, so a workspace with only this Mac never reads "1 connected".
+    public static func deviceCountLabel(for devices: [DeviceRecord]) -> String {
+        let others = devices.filter { !$0.isCurrent }.count
+        switch others {
+        case 0: return "This Mac only"
+        case 1: return "This Mac + 1 device"
+        default: return "This Mac + \(others) devices"
+        }
+    }
+
+    /// MCP connectors pair with role "connector"; the count reflects linked
+    /// connectors, not live MCP sessions — the server does not expose those.
+    public static func mcpConnectorCount(in devices: [DeviceRecord]) -> Int {
+        devices.filter { $0.role == "connector" }.count
+    }
+
+    /// The server sequence is a workspace-wide event cursor — device changes and
+    /// edits consume it too — so it is unfit as a visible label (the first paste
+    /// would read "#2"). Pastes are numbered by history position instead: oldest is #1.
+    public static func displayNumber(for paste: CachedPaste, in history: [CachedPaste]) -> Int {
+        1 + history.filter { $0.sequence < paste.sequence }.count
+    }
+
+    public func displayNumber(for paste: CachedPaste) -> Int {
+        Self.displayNumber(for: paste, in: history)
+    }
+
     public func renameDevice(id: String, displayName: String) async {
         do { try await session?.renameDevice(id: id, displayName: displayName); devices = session?.devices ?? [] } catch { errorMessage = "Device could not be renamed." }
     }
 
     public func revokeDevice(id: String) async {
         do { try await session?.revokeDevice(id: id); devices = session?.devices ?? [] } catch { errorMessage = "Device could not be revoked." }
+    }
+
+    // MARK: Pairing approval — the other device prints a code; this Mac approves it.
+
+    public static func pairingScopeLabel(_ scope: String) -> String {
+        switch scope {
+        case "connector": return "MCP connector (read-only)"
+        case "full": return "Full access"
+        default: return scope
+        }
+    }
+
+    public func lookupPairing(shortCode: String) async {
+        guard let pairingAPI else { return }
+        let code = shortCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else {
+            pairingNotice = "Enter the code shown on the other device."
+            return
+        }
+        pending = true; defer { pending = false }
+        do {
+            let details = try await pairingAPI.lookupPairing(shortCode: code)
+            guard details.status == "pending" else {
+                pendingApproval = nil
+                pairingNotice = "That request is already \(details.status)."
+                return
+            }
+            pendingApproval = details
+            pairingNotice = nil
+        } catch {
+            pendingApproval = nil
+            pairingNotice = "No pending request matches that code."
+        }
+    }
+
+    public func approvePendingPairing() async {
+        guard let pairingAPI, let request = pendingApproval else { return }
+        pending = true; defer { pending = false }
+        do {
+            _ = try await pairingAPI.approvePairing(id: request.pairingID, idempotencyKey: UUID().uuidString.lowercased())
+            pendingApproval = nil
+            pairingNotice = "\(request.proposedName) approved — it connects on its next claim."
+            try? await session?.refreshDevices()
+            devices = session?.devices ?? devices
+        } catch {
+            pairingNotice = "The request could not be approved."
+        }
+    }
+
+    public func denyPendingPairing() async {
+        guard let pairingAPI, let request = pendingApproval else { return }
+        pending = true; defer { pending = false }
+        do {
+            _ = try await pairingAPI.denyPairing(id: request.pairingID, idempotencyKey: UUID().uuidString.lowercased())
+            pendingApproval = nil
+            pairingNotice = "\(request.proposedName) denied."
+        } catch {
+            pairingNotice = "The request could not be denied."
+        }
+    }
+
+    public func dismissPairingApproval() {
+        pendingApproval = nil
+        pairingNotice = nil
     }
 
     private func enqueueDraft(kind: MutationKind, idempotencyKey: String) throws {
@@ -327,6 +426,7 @@ public final class AppModel: ObservableObject {
         let attachmentStore = try PendingAttachmentStore(root: cacheDirectory.appendingPathComponent("\(workspaceID)-pending-attachments", isDirectory: true))
         let attachmentCache = try AttachmentCache(root: cacheDirectory.appendingPathComponent("\(workspaceID)-attachment-cache", isDirectory: true))
         api = client
+        pairingAPI = client
         self.workspaceID = workspaceID
         session = WorkspaceSession(
             cache: cache,
@@ -417,6 +517,9 @@ public final class AppModel: ObservableObject {
 
 #if DEBUG
 extension AppModel {
+    func installAPIForTesting(_ api: any WorkspaceAPI) { self.api = api }
+    func installPairingAPIForTesting(_ api: any PairingAdminAPI) { self.pairingAPI = api }
+
     func previewSeed(
         screen: AppScreen = .pasteboard,
         draft: String = "",
