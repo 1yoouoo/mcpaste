@@ -4,6 +4,71 @@ MCPaste is a macOS menu bar app that deliberately hands plain text and static im
 
 > Status: Phases 1–6 are implemented and deployed to the production MVP. The public macOS release remains gated on the owner's Apple signing/notarization credentials and release-tag action.
 
+## Install
+
+Works on macOS and Linux (`amd64`/`arm64`). Requires `curl` and either `sha256sum` or `shasum`. This downloads the prebuilt `mcpaste` CLI from [GitHub Releases](https://github.com/1yoouoo/mcpaste/releases/latest), verifies its checksum, and installs it to `/usr/local/bin/mcpaste`:
+
+```sh
+arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac
+asset="mcpaste-$arch"; sums="Linux-SHA256SUMS"
+if [ "$(uname -s)" = Darwin ]; then asset="mcpaste-darwin-$arch"; sums="Darwin-SHA256SUMS"; fi
+curl -fsSLO "https://github.com/1yoouoo/mcpaste/releases/latest/download/$asset"
+curl -fsSLO "https://github.com/1yoouoo/mcpaste/releases/latest/download/$sums"
+checker=sha256sum; command -v sha256sum >/dev/null 2>&1 || checker='shasum -a 256'
+grep " $asset\$" "$sums" | $checker -c -
+chmod +x "$asset" && sudo mv "$asset" /usr/local/bin/mcpaste
+```
+
+The MCPaste service endpoint is baked into the release binary at build time, so `go install github.com/...` does not produce a working binary; build from source with the `-ldflags` recipe under [Development prerequisites](#development-prerequisites) instead.
+
+The macOS menu bar app (the full read/write interface) is attached to the same release as the notarized `MCPaste-final.zip` with `macOS-SHA256SUMS`; unzip it and move `MCPaste.app` to `/Applications`. Verification steps are in [Releases](docs/releases.md).
+
+## Usage
+
+### 1. Pair the machine (once per machine)
+
+```sh
+mcpaste setup --name my-machine
+```
+
+`setup` prints a pairing code (`short_code=XXXXXXXX`) and waits up to 5 minutes for approval. Approve the code from a device that already has full access, either way:
+
+- **GUI**: MCPaste menu bar icon → Workspace & devices → Approve a device → enter the code.
+- **Terminal (macOS only)**: `mcpaste approve <code>`.
+
+On approval, `setup` stores a read-only connector credential in `$XDG_CONFIG_HOME/mcpaste/credential.json` (default `~/.config/mcpaste/credential.json`) and automatically registers `mcpaste` as an MCP server in every AI tool configuration it detects:
+
+- Codex: `~/.codex/config.toml` (override with `--codex-config` or `CODEX_CONFIG_PATH`)
+- Claude Code: `~/.claude.json` (override with `--claude-config` or `CLAUDE_CONFIG_PATH`)
+
+If neither configuration exists, `setup` fails with `no Codex or Claude Code configuration detected` — start the AI tool once first, or pass an explicit config path. Restart the AI tool after setup so it picks up the new MCP server.
+
+### 2. Use it from the AI tool
+
+After setup, Codex and Claude Code have an `mcpaste` MCP server exposing one read-only tool, `get_latest_paste`, which returns the most recent paste (text and images) from the workspace. Create and edit pastes in the macOS menu bar app; ask the AI tool to read the latest paste.
+
+`mcpaste` with no arguments runs the read-only STDIO MCP proxy — this is what the AI tools invoke; you normally never run it by hand.
+
+### 3. Approve devices from the terminal (optional, macOS only)
+
+```sh
+mcpaste login                 # once; approve the printed code in the MCPaste app
+mcpaste approve <short-code>  # from then on, approve any device without the GUI
+```
+
+`login` pairs this machine as a full device and stores the admin credential at `~/.config/mcpaste/admin-credential.json` (plaintext file — protect it like a password). The service grants full scope only to macOS, so Linux machines always stay read-only connectors.
+
+### Command reference
+
+| Command | What it does | Flags |
+|---|---|---|
+| `mcpaste` | Run the read-only STDIO MCP proxy (used by AI tools) | — |
+| `mcpaste setup` | Pair as a read-only connector and register with detected AI tools | `--name`, `--credential-file`, `--codex-config`, `--claude-config` |
+| `mcpaste login` | Pair as a full admin device (macOS only) | `--name`, `--credential-file` |
+| `mcpaste approve <short-code>` | Approve a pending pairing request | `--credential-file` |
+
+Never put tokens, pairing codes, claim secrets, or recovery codes in URLs, logs, screenshots, issues, or pull requests.
+
 ## Product boundary
 
 - MCPaste does not automatically monitor the clipboard.
@@ -30,23 +95,6 @@ Codex / Claude Code --STDIO--> mcpaste connector --Streamable HTTP MCP--> MCPast
 The production MVP is one DigitalOcean Droplet with Caddy, the Go service, and PostgreSQL. The implementation consists of a SwiftUI app, Go service, and Go connector.
 
 Static images are normalized on macOS, encrypted on the server, retained for 24 hours, and returned to the read-only MCP tool as ordered image blocks. Text revisions remain immutable and are retained for one year.
-
-## Install the read-only connector (Linux)
-
-Download the prebuilt binary from [GitHub Releases](https://github.com/1yoouoo/mcpaste/releases/latest), verify its checksum, and pair it:
-
-```sh
-arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac
-curl -fsSLO "https://github.com/1yoouoo/mcpaste/releases/latest/download/mcpaste-$arch"
-curl -fsSLO "https://github.com/1yoouoo/mcpaste/releases/latest/download/Linux-SHA256SUMS"
-grep " mcpaste-$arch\$" Linux-SHA256SUMS | sha256sum -c -
-chmod +x "mcpaste-$arch" && sudo mv "mcpaste-$arch" /usr/local/bin/mcpaste
-mcpaste setup --name my-machine
-```
-
-`mcpaste setup` prints a pairing code and waits. Approve that code from a full device: the MCPaste menu bar app (Workspace & devices → Approve a device), or `mcpaste approve <code>` from a terminal that has run `mcpaste login` once. The service endpoint is baked into the release binary, so `go install` builds do not work; build from source with the `-ldflags` recipe below instead.
-
-The macOS menu bar app is attached to the same release as a notarized archive with `macOS-SHA256SUMS`; verification steps are in [Releases](docs/releases.md).
 
 ## Development prerequisites
 
