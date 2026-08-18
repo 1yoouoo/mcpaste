@@ -36,10 +36,11 @@ public final class RealtimeSyncLoop {
             await onPhase(.realtime)
             do {
                 try await openEvents()
-            } catch is CancellationError {
-                return
             } catch {
-                // Any SSE failure falls through to the same refresh-and-retry path.
+                // URLSession reports a request cancelled by system sleep or a network change
+                // as CancellationError, so only this task's own cancellation ends the loop.
+                // Every other failure, including that one, falls through to refresh-and-retry.
+                if Task.isCancelled { return }
             }
 
             guard !Task.isCancelled else { return }

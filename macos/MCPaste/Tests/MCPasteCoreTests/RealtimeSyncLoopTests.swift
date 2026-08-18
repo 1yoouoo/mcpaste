@@ -31,6 +31,23 @@ final class RealtimeSyncLoopTests: XCTestCase {
         XCTAssertEqual(phases, [.realtime, .polling, .realtime, .polling])
     }
 
+    // URLSession reports a cancelled request as CancellationError when the system sleeps or
+    // the network changes. Treating that as "stop syncing" left the app offline until relaunch.
+    func testACancelledRequestRetriesInsteadOfEndingTheLoop() async {
+        let recorder = LoopRecorder()
+        let loop = RealtimeSyncLoop(
+            openEvents: { throw CancellationError() },
+            refresh: { await recorder.record(.refresh) },
+            sleep: { _ in await recorder.record(.sleep) }
+        )
+
+        await loop.run(iterations: 2)
+
+        let events = await recorder.snapshot()
+        XCTAssertEqual(events, [.refresh, .sleep, .refresh, .sleep],
+                       "a cancelled request must fall through to the polling retry")
+    }
+
     func testCancellationStopsWithoutAnotherRefresh() async {
         let recorder = LoopRecorder()
         let loop = RealtimeSyncLoop(
