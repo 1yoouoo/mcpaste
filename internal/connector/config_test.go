@@ -1,10 +1,14 @@
 package connector
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 func TestConfigureCodexPreservesUnrelatedServersAndIsIdempotent(t *testing.T) {
@@ -48,7 +52,7 @@ func TestConfigureCodexPreservesUnrelatedServersAndIsIdempotent(t *testing.T) {
 
 func TestConfigureCodexMigratesExistingEndpointOverride(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
-	fixture := "[mcp_servers.mcpaste]\ncommand = \"/opt/mcpaste/bin/mcpaste\"\nargs = [\"--endpoint\", \"https://old.invalid/v1/mcp\"]\n"
+	fixture := "[mcp_servers.other]\ncommand = \"other-tool\"\nargs = [\"--keep\"]\n\n[mcp_servers.mcpaste]\ncommand = \"/opt/mcpaste/bin/mcpaste\"\nargs = [\"--endpoint\", \"https://old.invalid/v1/mcp\", \"--credential-file\", \"/tmp/legacy.json\", \"--safe\"]\nlegacy = true\n\n[mcp_servers.mcpaste.env]\nLEGACY = \"remove\"\n"
 	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
 		t.Fatalf("write Codex fixture: %v", err)
 	}
@@ -59,8 +63,18 @@ func TestConfigureCodexMigratesExistingEndpointOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read Codex config: %v", err)
 	}
-	if strings.Contains(string(data), "--endpoint") || strings.Contains(string(data), "old.invalid") {
-		t.Fatalf("migrated Codex config contains endpoint override: %s", data)
+	root := make(map[string]any)
+	if err := toml.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	servers := root["mcp_servers"].(map[string]any)
+	want := map[string]any{"command": "/opt/mcpaste/bin/mcpaste", "args": []any{}}
+	if got := servers["mcpaste"]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("migrated Codex entry = %#v, want %#v", got, want)
+	}
+	other := servers["other"].(map[string]any)
+	if got, want := other["args"], []any{"--keep"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unrelated Codex args = %#v, want %#v", got, want)
 	}
 }
 
@@ -104,8 +118,51 @@ func TestConfigureClientsRejectsMissingClientConfigurations(t *testing.T) {
 	t.Setenv("CODEX_CONFIG_PATH", "")
 	t.Setenv("CLAUDE_CONFIG_PATH", "")
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	err := ConfigureClients(ClientConfigOptions{CommandPath: "/opt/mcpaste/bin/mcpaste"})
+	_, err := ConfigureClients(ClientConfigOptions{CommandPath: "/opt/mcpaste/bin/mcpaste"})
 	if err == nil || !strings.Contains(err.Error(), "no Codex or Claude Code configuration") {
 		t.Fatalf("ConfigureClients() error = %v", err)
+	}
+}
+
+func TestConfigureClientsReturnsDeterministicConfiguredNames(t *testing.T) {
+	directory := t.TempDir()
+	configured, err := ConfigureClients(ClientConfigOptions{
+		CommandPath: "/opt/mcpaste/bin/mcpaste",
+		CodexPath:   filepath.Join(directory, "codex.toml"),
+		ClaudePath:  filepath.Join(directory, "claude.json"),
+	})
+	if err != nil {
+		t.Fatalf("ConfigureClients() error = %v", err)
+	}
+	if want := []string{"Codex", "Claude Code"}; !reflect.DeepEqual(configured.Names, want) {
+		t.Fatalf("configured names = %q, want %q", configured.Names, want)
+	}
+}
+
+func TestConfigureClaudeMigratesMatchedEntryToCanonical(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claude.json")
+	fixture := `{"mcpServers":{"other":{"command":"other-tool","args":["--keep"]},"mcpaste":{"command":"/opt/mcpaste/bin/mcpaste","args":["--safe","--endpoint=https://old.invalid/v1/mcp","--credential-file","/local/credential.json"],"env":{"LEGACY":"remove"},"unknown":true}}}`
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ConfigureClaude(path, "/opt/mcpaste/bin/mcpaste"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := make(map[string]any)
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	servers := root["mcpServers"].(map[string]any)
+	want := map[string]any{"command": "/opt/mcpaste/bin/mcpaste", "args": []any{}}
+	if got := servers["mcpaste"]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("migrated Claude entry = %#v, want %#v", got, want)
+	}
+	other := servers["other"].(map[string]any)
+	if got, want := other["args"], []any{"--keep"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unrelated Claude args = %#v, want %#v", got, want)
 	}
 }

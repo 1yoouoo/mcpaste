@@ -18,29 +18,29 @@ jobs:
     name: Go checks
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    services:
-      postgres:
-        image: postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
-        env:
-          POSTGRES_DB: mcpaste
-          POSTGRES_USER: mcpaste
-          POSTGRES_PASSWORD: mcpaste-ci-only-not-production
-        ports:
-          - 55439:5432
-        options: >-
-          --health-cmd "pg_isready -U mcpaste -d mcpaste"
-          --health-interval 2s
-          --health-timeout 3s
-          --health-retries 20
-    env:
-      MCPASTE_DATABASE_URL: postgres://mcpaste:mcpaste-ci-only-not-production@127.0.0.1:55439/mcpaste?sslmode=disable
-      MCPASTE_TEST_DATABASE_URL: postgres://mcpaste:mcpaste-ci-only-not-production@127.0.0.1:55439/mcpaste?sslmode=disable
-      MCPASTE_ENDPOINT: ${{ vars.MCPASTE_ENDPOINT }}
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+
+      - name: Reject hosted architecture references
+        run: |
+          hosted_terms='Digital''Ocean|Postgre''SQL|MCPASTE_''ENDPOINT|recovery ''code|pairing ''code|Linux ''companion'
+          if git grep -n -E "$hosted_terms" -- \
+            README.md SECURITY.md docs install.sh .github/workflows \
+            macos/MCPaste/Sources cmd internal \
+            ':!docs/superpowers/**'
+          then
+            printf '%s\n' 'Hosted architecture reference remains in a current product file.' >&2
+            exit 1
+          else
+            grep_exit=$?
+            if [ "$grep_exit" -ne 1 ]; then
+              printf '%s\n' 'Hosted architecture scan failed.' >&2
+              exit 1
+            fi
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
@@ -53,63 +53,22 @@ jobs:
           go mod tidy -diff
           go mod verify
 
-      - name: Verify migrations
-        run: |
-          GOFLAGS=-mod=readonly go run ./cmd/migrate up
-          GOFLAGS=-mod=readonly go run ./cmd/migrate verify
-
-      - name: Verify deployment scripts
-        run: |
-          bash deploy/tests/deploy_scripts_test.sh
-          bash deploy/tests/workflow_contract_test.sh
-          bash deploy/tests/configure_endpoint_test.sh
-          bash deploy/compose.production.test.sh
-
       - name: Check formatting
-        run: test -z "$(find cmd internal db -type f -name '*.go' -exec gofmt -l {} +)"
+        run: test -z "$(gofmt -l cmd/mcpaste internal/connector internal/peer)"
 
       - name: Vet
-        run: GOFLAGS=-mod=readonly go vet ./cmd/healthcheck ./cmd/migrate ./cmd/mcpaste ./cmd/server ./db/migrations ./internal/config ./internal/connector ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/images ./internal/mcpserver ./internal/secure ./internal/testdb
+        run: go vet ./cmd/mcpaste ./internal/connector ./internal/peer
 
-      - name: Test with race detector and PostgreSQL
-        run: GOFLAGS=-mod=readonly go test -race -coverprofile=coverage.out ./cmd/healthcheck ./cmd/migrate ./cmd/mcpaste ./cmd/server ./db/migrations ./internal/config ./internal/connector ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/images ./internal/mcpserver ./internal/secure ./internal/testdb
-
-      - name: Build server and migration command
-        run: |
-          GOFLAGS=-mod=readonly go build -o /tmp/mcpaste-server ./cmd/server
-          GOFLAGS=-mod=readonly go build -o /tmp/mcpaste-migrate ./cmd/migrate
-          GOFLAGS=-mod=readonly CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/mcpaste-healthcheck-amd64 ./cmd/healthcheck
-          GOFLAGS=-mod=readonly CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-X=github.com/1yoouoo/mcpaste/internal/connector.BuildEndpoint=$MCPASTE_ENDPOINT" -o /tmp/mcpaste-linux-amd64 ./cmd/mcpaste
-          GOFLAGS=-mod=readonly CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-X=github.com/1yoouoo/mcpaste/internal/connector.BuildEndpoint=$MCPASTE_ENDPOINT" -o /tmp/mcpaste-linux-arm64 ./cmd/mcpaste
+      - name: Test with race detector
+        run: go test -race ./cmd/mcpaste ./internal/connector ./internal/peer
 
       - name: Check known Go vulnerabilities
-        run: GOFLAGS=-mod=readonly go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./cmd/healthcheck ./cmd/migrate ./cmd/mcpaste ./cmd/server ./db/migrations ./internal/config ./internal/connector ./internal/database ./internal/database/migrate ./internal/httpserver ./internal/identity ./internal/identity/postgres ./internal/images ./internal/mcpserver ./internal/secure ./internal/testdb
-
-  container:
-    name: Container build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-
-      - name: Build server image
-        run: docker build -t mcpaste-server:ci .
-
-      - name: Inspect non-root default
-        run: test "$(docker image inspect mcpaste-server:ci --format '{{.Config.User}}')" = "65532:65532"
-
-      - name: Inspect healthcheck binary
-        run: docker run --rm --entrypoint /mcpaste-healthcheck mcpaste-server:ci --help || test "$?" -eq 1
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./cmd/mcpaste ./internal/connector ./internal/peer
 
   swift:
-    name: macOS client checks
+    name: macOS app checks
     runs-on: macos-14
     timeout-minutes: 20
-    env:
-      MCPASTE_ENDPOINT: ${{ vars.MCPASTE_ENDPOINT }}
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -119,18 +78,8 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select --switch /Applications/Xcode_15.4.app
 
-      - name: Swift tests
-        working-directory: macos/MCPaste
-        run: |
-          ../../scripts/configure-endpoint.sh
-          swift test
-
-      - name: Swift release build
-        working-directory: macos/MCPaste
-        run: swift build -c release
-
-      - name: Swift package typecheck contract
-        run: test -f macos/MCPaste/Package.swift
+      - name: Test and build
+        run: (cd macos/MCPaste && swift test && swift build -c release)
 
   secrets:
     name: Secret scan
@@ -157,13 +106,13 @@ jobs:
             '(sk-[A-Za-z0-9]{12,}|ghp_[A-Za-z0-9]{12,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' \
             -- ':!.github/workflows/ci.yml' \
             ':!docs/security-and-secrets.md' \
-            ':!docs/superpowers/plans/**'
+            ':!docs/superpowers/**'
           then
             printf '%s\n' 'Potential secret pattern detected.' >&2
             exit 1
           else
-            secret_pattern_status=$?
-            if [ "$secret_pattern_status" -ne 1 ]; then
+            secret_pattern_exit=$?
+            if [ "$secret_pattern_exit" -ne 1 ]; then
               printf '%s\n' 'Secret-pattern scan failed.' >&2
               exit 1
             fi

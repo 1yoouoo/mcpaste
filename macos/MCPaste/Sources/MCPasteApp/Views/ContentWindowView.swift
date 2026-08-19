@@ -1,19 +1,25 @@
-import SwiftUI
-import UniformTypeIdentifiers
 import AppKit
 import MCPasteCore
+import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentWindowView: View {
     @ObservedObject var model: AppModel
     @State private var isDropTargeted = false
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            HistorySidebar(model: model)
-                .navigationSplitViewColumnWidth(min: 200, ideal: 232, max: 320)
-        } detail: {
-            EditorDetail(model: model, isDropTargeted: $isDropTargeted)
+        VStack(spacing: 0) {
+            DetailHeader(model: model)
+            Divider()
+            if let message = model.errorMessage {
+                ErrorBanner(message: message)
+                Divider()
+            }
+            ContextEditor(model: model, isDropTargeted: $isDropTargeted)
+            Divider()
+            AttachmentStrip(model: model)
+            Divider()
+            DetailFooter(model: model)
         }
         .navigationTitle("MCPaste")
         .frame(minWidth: 720, minHeight: 460)
@@ -27,16 +33,14 @@ struct ContentWindowView: View {
         .onAppear {
             ImagePasteMonitor.shared.subscribe(
                 paste: { images in Task { await model.uploadImages(images) } },
-                newPaste: { Task { await model.startNewPaste() } }
+                newPaste: { Task { await model.clearContext() } }
             )
         }
         .onDisappear {
             ImagePasteMonitor.shared.unsubscribe()
-            Task { await model.saveIfNeeded() }
         }
     }
 
-    /// A drop anywhere in the window: images attach, text lands in the editor.
     private func handleProviders(_ providers: [NSItemProvider]) {
         Task {
             var images: [Data] = []
@@ -50,8 +54,10 @@ struct ContentWindowView: View {
                     } else if let contents = try? String(contentsOf: url, encoding: .utf8) {
                         text += contents
                     }
-                } else if let data = await load(provider, as: UTType.utf8PlainText.identifier),
-                          let contents = String(data: data, encoding: .utf8) {
+                } else if
+                    let data = await load(provider, as: UTType.utf8PlainText.identifier),
+                    let contents = String(data: data, encoding: .utf8)
+                {
                     text += contents
                 }
             }
@@ -61,7 +67,9 @@ struct ContentWindowView: View {
     }
 
     private func imageData(at url: URL) -> Data? {
-        guard let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image) else { return nil }
+        guard let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image) else {
+            return nil
+        }
         return try? Data(contentsOf: url)
     }
 
@@ -79,157 +87,11 @@ struct ContentWindowView: View {
         return await withCheckedContinuation { continuation in
             provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
                 guard let data, let text = String(data: data, encoding: .utf8) else {
-                    return continuation.resume(returning: nil)
+                    continuation.resume(returning: nil)
+                    return
                 }
                 continuation.resume(returning: URL(string: text))
             }
-        }
-    }
-}
-
-// MARK: - Sidebar
-
-private struct HistorySidebar: View {
-    @ObservedObject var model: AppModel
-    @State private var query = ""
-
-    var body: some View {
-        VStack(spacing: 0) {
-            List(selection: selectionBinding) {
-                if model.history.isEmpty {
-                    Text(EditorStatus.emptyHistory)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(nil)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .listRowSeparator(.hidden)
-                } else {
-                    ForEach(filtered, id: \.id) { paste in
-                        HistoryRow(paste: paste, number: model.displayNumber(for: paste))
-                            .tag(paste.id)
-                    }
-                }
-            }
-            .listStyle(.sidebar)
-            .searchable(text: $query, placement: .sidebar, prompt: "Search history")
-
-            Divider()
-            DeviceFooter(model: model)
-        }
-    }
-
-    private var filtered: [CachedPaste] {
-        guard !query.isEmpty else { return model.history }
-        return model.history.filter { ($0.text ?? "").localizedCaseInsensitiveContains(query) }
-    }
-
-    private var selectionBinding: Binding<String?> {
-        Binding(
-            get: { model.selectedPasteID },
-            set: { id in
-                guard let id, let paste = model.history.first(where: { $0.id == id }) else { return }
-                Task { await model.selectPaste(paste) }
-            }
-        )
-    }
-}
-
-private struct HistoryRow: View {
-    let paste: CachedPaste
-    let number: Int
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.system(size: 12))
-                .lineLimit(2)
-                .foregroundStyle(paste.deleted ? .secondary : .primary)
-            HStack(spacing: 5) {
-                Text("#\(number)")
-                if !paste.attachments.isEmpty {
-                    Text("·")
-                    Image(systemName: "photo").font(.system(size: 9))
-                    Text("\(paste.attachments.count)")
-                }
-                if paste.deleted {
-                    Text("·")
-                    Text("Deleted")
-                }
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-        }
-        .padding(.vertical, 3)
-    }
-
-    private var title: String {
-        if paste.deleted { return "Deleted paste" }
-        guard let text = paste.text, !text.isEmpty else { return "Images only" }
-        return text
-    }
-}
-
-private struct DeviceFooter: View {
-    @ObservedObject var model: AppModel
-    @State private var expanded = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
-                expanded.toggle()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "laptopcomputer.and.iphone").font(.caption).foregroundStyle(.secondary)
-                    Text(AppModel.deviceCountLabel(for: model.devices))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Image(systemName: expanded ? "chevron.down" : "chevron.up")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if expanded {
-                ForEach(model.devices) { device in
-                    HStack(spacing: 6) {
-                        Text(device.displayName).font(.caption).lineLimit(1)
-                        Spacer(minLength: 4)
-                        Text(device.isCurrent ? "This Mac" : device.platform)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-    }
-}
-
-// MARK: - Detail
-
-private struct EditorDetail: View {
-    @ObservedObject var model: AppModel
-    @Binding var isDropTargeted: Bool
-
-    var body: some View {
-        VStack(spacing: 0) {
-            DetailHeader(model: model)
-            Divider()
-            if let message = model.errorMessage {
-                ErrorBanner(message: message) {
-                    Task { await model.retryNow() }
-                }
-                Divider()
-            }
-            PasteEditor(model: model, isDropTargeted: $isDropTargeted)
-            Divider()
-            AttachmentStrip(model: model)
-            Divider()
-            DetailFooter(model: model)
         }
     }
 }
@@ -240,50 +102,41 @@ private struct DetailHeader: View {
     var body: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.system(size: 13, weight: .semibold))
-                // Recomputed on a schedule so "Synced 12 seconds ago" does not freeze.
+                Text("Current context")
+                    .font(.system(size: 13, weight: .semibold))
                 TimelineView(.periodic(from: .now, by: 10)) { context in
-                    Text(subtitle(now: context.date)).font(.caption).foregroundStyle(.secondary)
+                    Text(
+                        EditorStatus.subtitle(
+                            lastUpdatedBy: model.lastUpdatedBy,
+                            lastUpdatedAt: model.lastUpdatedAt,
+                            now: context.date
+                        )
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 }
             }
-            Spacer()
-            StatusPill(text: pill.text, color: pill.color)
+            Spacer(minLength: 12)
+            StatusPill(state: model.syncState)
             Button {
-                Task { await model.startNewPaste() }
+                Task { await model.clearContext() }
             } label: {
                 Image(systemName: "square.and.pencil")
             }
-            .help("New paste (⌘N)")
+            .buttonStyle(.borderless)
+            .controlSize(.regular)
+            .keyboardShortcut("n", modifiers: .command)
+            .help("Start a blank shared context (⌘N)")
+            .accessibilityLabel(BlankContextAction.accessibilityLabel)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
-    }
-
-    private var title: String {
-        guard let paste = model.selectedPaste else { return "New paste" }
-        return "Paste #\(model.displayNumber(for: paste))"
-    }
-
-    private func subtitle(now: Date) -> String {
-        EditorStatus.headerSubtitle(
-            hasSavedSelection: model.selectedPaste != nil,
-            lastSyncedAt: model.lastSyncedAt,
-            now: now
-        )
-    }
-
-    private var pill: (text: String, color: Color) {
-        EditorStatus.pill(
-            syncFailed: model.syncFailed,
-            syncing: model.pending || model.pendingCount > 0,
-            connected: model.syncStatus != .notConnected
-        )
     }
 }
 
 private struct ErrorBanner: View {
     let message: String
-    let dismiss: () -> Void
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -293,10 +146,7 @@ private struct ErrorBanner: View {
             Text(message)
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 8)
-            Button("Dismiss", action: dismiss)
-                .buttonStyle(.link)
-                .font(.callout)
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
@@ -304,7 +154,7 @@ private struct ErrorBanner: View {
     }
 }
 
-private struct PasteEditor: View {
+private struct ContextEditor: View {
     @ObservedObject var model: AppModel
     @Binding var isDropTargeted: Bool
 
@@ -313,7 +163,7 @@ private struct PasteEditor: View {
             PasteTextEditor(text: $model.draft, isDropTargeted: $isDropTargeted) { images in
                 Task { await model.uploadImages(images) }
             }
-            .accessibilityLabel("Paste text")
+            .accessibilityLabel("Current context text")
             if model.draft.isEmpty {
                 Text("Write or paste text here…")
                     .font(.system(size: 12, design: .monospaced))
@@ -337,18 +187,18 @@ private struct AttachmentStrip: View {
                 AttachmentThumbnail(image: image) {
                     Task { await model.removeAttachment(at: index) }
                 }
-                .disabled(model.isUploading)
+                .disabled(model.uploadingCount > 0)
             }
             ForEach(0..<model.uploadingCount, id: \.self) { _ in
                 ArrivingThumbnail()
             }
             if model.attachments.count + model.uploadingCount < ImageNormalizer.maxAttachmentItems {
-                DropHint(empty: model.attachments.isEmpty && !model.isUploading)
+                DropHint(empty: model.attachments.isEmpty && model.uploadingCount == 0)
             }
             Spacer(minLength: 8)
             Text(countLabel)
                 .font(.caption)
-                .foregroundStyle(model.isUploading ? Color.accentColor : Color.secondary)
+                .foregroundStyle(model.uploadingCount > 0 ? Color.accentColor : Color.secondary)
                 .animation(.default, value: model.uploadingCount)
         }
         .padding(.horizontal, 14)
@@ -356,14 +206,13 @@ private struct AttachmentStrip: View {
     }
 
     private var countLabel: String {
-        if model.isUploading {
+        if model.uploadingCount > 0 {
             return model.uploadingCount == 1 ? "Adding 1 image…" : "Adding \(model.uploadingCount) images…"
         }
         return "\(model.attachments.count) of \(ImageNormalizer.maxAttachmentItems) images"
     }
 }
 
-/// Placeholder for an image that has been accepted but is still being prepared or sent.
 private struct ArrivingThumbnail: View {
     @State private var pulsing = false
 
@@ -372,9 +221,14 @@ private struct ArrivingThumbnail: View {
             .fill(.quaternary)
             .frame(width: 44, height: 32)
             .overlay(ProgressView().controlSize(.small).scaleEffect(0.7))
-            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.accentColor.opacity(pulsing ? 0.7 : 0.25)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(Color.accentColor.opacity(pulsing ? 0.7 : 0.25))
+            )
             .onAppear {
-                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { pulsing = true }
+                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                    pulsing = true
+                }
             }
             .accessibilityLabel("Image being added")
     }
@@ -440,14 +294,22 @@ private struct DetailFooter: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "text.alignleft").font(.caption2).foregroundStyle(.tertiary)
+            Image(systemName: "text.alignleft")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
             Text(statistics)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Spacer()
-            Label(saveState.text, systemImage: saveState.icon)
+                .lineLimit(1)
+            Spacer(minLength: 12)
+            Text(ConnectorConfigurationCopy.text(count: model.connectorNames.count))
                 .font(.caption)
-                .foregroundStyle(saveState.tint)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Label("Shared automatically", systemImage: "arrow.triangle.2.circlepath")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
@@ -457,41 +319,31 @@ private struct DetailFooter: View {
         let lines = model.draft.isEmpty ? 0 : model.draft.components(separatedBy: "\n").count
         return "Exact text preserved · \(lines) lines · \(model.draft.count) characters"
     }
+}
 
-    private var saveState: (text: String, icon: String, tint: Color) {
-        let state = EditorStatus.footer(
-            saving: model.pending || model.isUploading,
-            connectorCount: AppModel.mcpConnectorCount(in: model.devices)
-        )
-        return (state.text, state.icon, .secondary)
+enum ConnectorConfigurationCopy {
+    static func text(count: Int) -> String {
+        count == 1 ? "1 MCP connector configured" : "\(count) MCP connectors configured"
     }
 }
 
-/// Pure descriptions of the editor's status line. Everything saves automatically,
-/// so the header and footer report what the user cannot otherwise see: the network
-/// connection and the MCP connectors linked to this workspace.
+enum BlankContextAction {
+    static let accessibilityLabel = "Start a blank shared context"
+}
+
 enum EditorStatus {
-    static let emptyHistory = "No pastes yet. Write something — it saves automatically."
-
-    static func pill(syncFailed: Bool, syncing: Bool, connected: Bool) -> (text: String, color: Color) {
-        if syncFailed { return ("Offline", .red) }
-        if syncing { return ("Syncing", .orange) }
-        return connected ? ("Online", .green) : ("Connecting", .secondary)
-    }
-
-    static func headerSubtitle(hasSavedSelection: Bool, lastSyncedAt: Date?, now: Date) -> String {
-        guard hasSavedSelection else { return "Saves automatically" }
-        guard let lastSyncedAt else { return "Saved" }
-        return "Synced \(RelativeTime.string(for: lastSyncedAt, now: now))"
-    }
-
-    static func footer(saving: Bool, connectorCount: Int) -> (text: String, icon: String) {
-        if saving { return ("Saving…", "arrow.triangle.2.circlepath") }
-        switch connectorCount {
-        case 0: return ("No MCP connector linked yet", "cable.connector.horizontal")
-        case 1: return ("1 MCP connector linked", "cable.connector.horizontal")
-        default: return ("\(connectorCount) MCP connectors linked", "cable.connector.horizontal")
+    static func text(for state: PeerSyncState) -> String {
+        switch state {
+        case .upToDate: return "Up to date"
+        case .updating: return "Updating…"
+        case .waitingToSync: return "Waiting to sync"
+        case .sourceOffline: return "Source offline"
         }
+    }
+
+    static func subtitle(lastUpdatedBy: String?, lastUpdatedAt: Date?, now: Date) -> String {
+        guard let lastUpdatedBy, let lastUpdatedAt else { return "Changes sync automatically" }
+        return "Updated from \(lastUpdatedBy) · \(RelativeTime.string(for: lastUpdatedAt, now: now))"
     }
 }
 

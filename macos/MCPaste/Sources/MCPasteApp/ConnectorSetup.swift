@@ -1,34 +1,40 @@
+import Darwin
 import Foundation
 
-/// Configures this Mac's own AI-tool connector with the CLI embedded in the app
-/// bundle. On the first run it spawns `mcpaste setup`, approves the pairing code
-/// the CLI prints using the app's own credential, and lets the CLI store the
-/// connector credential and register itself with Codex/Claude Code. On later
-/// launches it spawns `mcpaste register`, which only re-registers the executable
-/// so AI tools installed after setup are still picked up.
+enum ConnectorSetupError: Error, Equatable {
+    case credentialRequired
+    case launchFailed
+    case processFailed
+    case invalidResponse
+}
+
+/// Registers the bundled, model-neutral STDIO connector with supported local
+/// AI clients after the peer runtime has created its loopback credential.
 struct ConnectorSetup {
-    enum Outcome: Equatable {
-        case configured
-        case noAITools
-        case failed
-    }
+    private static let maxOutputBytes = 16 * 1024
 
     let cliURL: URL
     let credentialURL: URL
-    let deviceName: String
+    let completionTimeout: TimeInterval
+    private let configureOutputDescriptor: (Int32) -> Bool
 
-    static let noAIToolsMarker = "no Codex or Claude Code configuration detected"
+    init(
+        cliURL: URL,
+        credentialURL: URL,
+        completionTimeout: TimeInterval = 2,
+        configureOutputDescriptor: @escaping (Int32) -> Bool = ConnectorSetup.setNonblocking
+    ) {
+        self.cliURL = cliURL
+        self.credentialURL = credentialURL
+        self.completionTimeout = min(max(completionTimeout, 0.01), 2)
+        self.configureOutputDescriptor = configureOutputDescriptor
+    }
 
-    /// The CLI shipped inside the released app bundle; absent in `swift run`
-    /// development builds, in which case connector setup is silently skipped.
-    /// It lives in Contents/Helpers because Contents/MacOS/mcpaste would
-    /// collide with the MCPaste app binary on case-insensitive filesystems.
     static func embeddedCLIURL(bundleURL: URL = Bundle.main.bundleURL) -> URL? {
         let url = bundleURL.appendingPathComponent("Contents/Helpers/mcpaste")
         return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
     }
 
-    /// Mirrors the CLI's DefaultCredentialPath: $XDG_CONFIG_HOME or ~/.config.
     static func credentialFileURL(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         home: URL = FileManager.default.homeDirectoryForCurrentUser
@@ -42,104 +48,193 @@ struct ConnectorSetup {
         return base.appendingPathComponent("mcpaste/credential.json")
     }
 
-    static func shortCode(fromSetupOutput line: String) -> String? {
-        for token in line.split(separator: " ") where token.hasPrefix("short_code=") {
-            let code = String(token.dropFirst("short_code=".count))
-            return code.isEmpty ? nil : code
+    func run() async throws -> [String] {
+        guard Self.isRegularCredential(credentialURL) else {
+            throw ConnectorSetupError.credentialRequired
         }
-        return nil
-    }
-
-    /// `approve` receives the pairing short code and must approve it through the
-    /// app's own API session; setup completes once the CLI claims the approval.
-    func run(approve: @escaping (String) async throws -> Void) async -> Outcome {
-        if FileManager.default.fileExists(atPath: credentialURL.path) {
-            return await runRegister()
-        }
-        return await runSetup(approve: approve)
-    }
-
-    private func runRegister() async -> Outcome {
         let process = Process()
+        let stdout = Pipe()
         process.executableURL = cliURL
         process.arguments = ["register"]
-        return await finish(process: process)
-    }
-
-    private func runSetup(approve: @escaping (String) async throws -> Void) async -> Outcome {
-        let process = Process()
-        process.executableURL = cliURL
-        process.arguments = ["setup", "--name", "\(deviceName) AI tools"]
-        let stdout = Pipe()
         process.standardOutput = stdout
-        let stderr = Pipe()
-        process.standardError = stderr
-
+        process.standardError = FileHandle.nullDevice
         do {
             try process.run()
         } catch {
-            return .failed
+            throw ConnectorSetupError.launchFailed
         }
+        let started = DispatchTime.now().uptimeNanoseconds
+        let budget = UInt64(completionTimeout * 1_000_000_000)
+        let deadline = started &+ budget
+        let cleanupBudget = max(1_000_000, budget / 10)
+        let workDeadline = deadline - cleanupBudget
 
-        let firstLine = await Self.firstLine(from: stdout.fileHandleForReading)
-        guard let code = Self.shortCode(fromSetupOutput: firstLine) else {
-            process.terminate()
-            return .failed
-        }
         do {
-            try await approve(code)
+            try? stdout.fileHandleForWriting.close()
+            let reader = stdout.fileHandleForReading
+            defer { try? reader.close() }
+            let descriptor = reader.fileDescriptor
+            guard configureOutputDescriptor(descriptor) else {
+                throw ConnectorSetupError.processFailed
+            }
+
+            let output = try await Self.collectOutput(
+                descriptor: descriptor,
+                process: process,
+                deadline: workDeadline
+            )
+            return try Self.decodeResponse(output)
+        } catch let error as ConnectorSetupError {
+            await Self.cleanupOwnedProcess(
+                process,
+                deadline: min(deadline, DispatchTime.now().uptimeNanoseconds &+ cleanupBudget)
+            )
+            throw error
         } catch {
-            // Without an approval the CLI would poll for five minutes; stop it.
-            process.terminate()
-            return .failed
+            await Self.cleanupOwnedProcess(
+                process,
+                deadline: min(deadline, DispatchTime.now().uptimeNanoseconds &+ cleanupBudget)
+            )
+            throw ConnectorSetupError.processFailed
         }
-        return await Self.outcome(awaiting: process, stderr: stderr)
     }
 
-    private func finish(process: Process) async -> Outcome {
-        let stderr = Pipe()
-        process.standardError = stderr
-        process.standardOutput = Pipe()
+    private static func collectOutput(
+        descriptor: Int32,
+        process: Process,
+        deadline: UInt64
+    ) async throws -> Data {
+        var output = Data()
+        var reachedEOF = false
+
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if !reachedEOF {
+                reachedEOF = try drain(reader: descriptor, into: &output)
+            }
+            if !process.isRunning {
+                guard process.terminationStatus == 0 else {
+                    throw ConnectorSetupError.processFailed
+                }
+                if reachedEOF { return output }
+            }
+            let now = DispatchTime.now().uptimeNanoseconds
+            let remaining = deadline > now ? deadline - now : 0
+            if remaining > 0 { try? await Task.sleep(nanoseconds: min(10_000_000, remaining)) }
+        }
+
+        if process.isRunning { throw ConnectorSetupError.processFailed }
+        guard process.terminationStatus == 0, reachedEOF else {
+            throw process.terminationStatus == 0
+                ? ConnectorSetupError.invalidResponse
+                : ConnectorSetupError.processFailed
+        }
+        return output
+    }
+
+    private static func decodeResponse(_ output: Data) throws -> [String] {
+        guard
+            output.last == 0x0A,
+            output.filter({ $0 == 0x0A }).count == 1,
+            !output.contains(0x0D)
+        else {
+            throw ConnectorSetupError.invalidResponse
+        }
+        let line = output.dropLast()
+        let response: RegistrationResponse
         do {
-            try process.run()
+            response = try JSONDecoder().decode(RegistrationResponse.self, from: line)
         } catch {
-            return .failed
+            throw ConnectorSetupError.invalidResponse
         }
-        return await Self.outcome(awaiting: process, stderr: stderr)
+        switch response.configuredClients {
+        case ["Codex"], ["Claude Code"], ["Codex", "Claude Code"]:
+            break
+        default:
+            throw ConnectorSetupError.invalidResponse
+        }
+        return response.configuredClients
     }
 
-    private static func outcome(awaiting process: Process, stderr: Pipe) async -> Outcome {
-        let errorOutput = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                let data = stderr.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                continuation.resume(returning: String(decoding: data, as: UTF8.self))
-            }
+    private static func cleanupOwnedProcess(_ process: Process, deadline: UInt64) async {
+        guard process.isRunning else { return }
+        process.terminate()
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        let killDeadline = now &+ (deadline > now ? deadline - now : 0) / 2
+        while process.isRunning && DispatchTime.now().uptimeNanoseconds < killDeadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
         }
-        if process.terminationStatus == 0 { return .configured }
-        return errorOutput.contains(noAIToolsMarker) ? .noAITools : .failed
+        if process.isRunning {
+            Darwin.kill(process.processIdentifier, SIGKILL)
+        }
+        while process.isRunning && DispatchTime.now().uptimeNanoseconds < deadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        if process.isRunning {
+            ConnectorProcessReaper.shared.retainUntilExit(process)
+        }
     }
 
-    // The readability handler runs serially and is removed before the
-    // continuation resumes, so the box needs no locking.
-    private final class LineBuffer: @unchecked Sendable { var data = Data() }
+    private static func isRegularCredential(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFREG
+    }
 
-    private static func firstLine(from handle: FileHandle) async -> String {
-        let buffer = LineBuffer()
-        return await withCheckedContinuation { continuation in
-            handle.readabilityHandler = { handle in
-                let chunk = handle.availableData
-                if chunk.isEmpty {
-                    handle.readabilityHandler = nil
-                    continuation.resume(returning: String(decoding: buffer.data, as: UTF8.self))
-                    return
+    private static func setNonblocking(_ descriptor: Int32) -> Bool {
+        let flags = fcntl(descriptor, F_GETFL)
+        return flags >= 0 && fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0
+    }
+
+    private static func drain(reader: Int32, into data: inout Data) throws -> Bool {
+        var buffer = [UInt8](repeating: 0, count: 4 * 1024)
+        while true {
+            let count = Darwin.read(reader, &buffer, buffer.count)
+            if count > 0 {
+                guard data.count <= maxOutputBytes - count else {
+                    throw ConnectorSetupError.invalidResponse
                 }
-                buffer.data.append(chunk)
-                if let newline = buffer.data.firstIndex(of: 0x0A) {
-                    handle.readabilityHandler = nil
-                    continuation.resume(returning: String(decoding: buffer.data[..<newline], as: UTF8.self))
-                }
+                data.append(contentsOf: buffer[0..<count])
+                continue
             }
+            if count == 0 { return true }
+            if errno == EAGAIN || errno == EWOULDBLOCK { return false }
+            throw ConnectorSetupError.invalidResponse
         }
+    }
+}
+
+private final class ConnectorProcessReaper: @unchecked Sendable {
+    static let shared = ConnectorProcessReaper()
+
+    private let lock = NSLock()
+    private var processes: [ObjectIdentifier: Process] = [:]
+
+    func retainUntilExit(_ process: Process) {
+        let identifier = ObjectIdentifier(process)
+        lock.lock()
+        processes[identifier] = process
+        lock.unlock()
+
+        process.terminationHandler = { [weak self] process in
+            process.terminationHandler = nil
+            self?.release(identifier)
+        }
+        if !process.isRunning {
+            release(identifier)
+        }
+    }
+
+    private func release(_ identifier: ObjectIdentifier) {
+        lock.lock()
+        processes.removeValue(forKey: identifier)
+        lock.unlock()
+    }
+}
+
+private struct RegistrationResponse: Decodable {
+    let configuredClients: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case configuredClients = "configured_clients"
     }
 }

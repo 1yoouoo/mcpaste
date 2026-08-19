@@ -1,70 +1,172 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
-	"github.com/1yoouoo/mcpaste/internal/identity"
-	"github.com/1yoouoo/mcpaste/internal/mcpserver"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-type proxyLatestService struct{}
-
-func (proxyLatestService) LatestPaste(context.Context, identity.Principal) (identity.LatestPaste, error) {
-	return identity.LatestPaste{Available: true, Text: "proxy exact text\r\n끝"}, nil
-}
-
-func TestProxyForwardsOnlyLatestPasteWithBearerHeader(t *testing.T) {
-	const token = "example-token-not-real"
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+token {
-			http.Error(w, "wrong auth", http.StatusUnauthorized)
-			return
+func TestProxyExposesOneLocalContextToolAndMapsExactOrderedContent(t *testing.T) {
+	first := []byte("png-mcp-content")
+	second := []byte("jpeg-mcp-content")
+	manifest := localTestManifest("exact text\r\nwith trailing space \t\r\n", first, second)
+	var manifestCalls atomic.Int32
+	var assetCalls atomic.Int32
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertLocalRequest(t, r)
+		switch r.URL.Path {
+		case "/v1/local/context":
+			manifestCalls.Add(1)
+			writeLocalJSON(t, w, http.StatusOK, manifest)
+		case "/v1/local/context/assets/0":
+			assetCalls.Add(1)
+			writeLocalAsset(w, manifest.Assets[0], first)
+		case "/v1/local/context/assets/1":
+			assetCalls.Add(1)
+			writeLocalAsset(w, manifest.Assets[1], second)
+		default:
+			http.NotFound(w, r)
 		}
-		if r.URL.RawQuery != "" || r.URL.String() != "/v1/mcp" {
-			http.Error(w, "credential in URL", http.StatusBadRequest)
-			return
-		}
-		mcpserver.NewHandler(proxyLatestService{}).ServeHTTP(w, r.WithContext(mcpserver.WithPrincipal(r.Context(), identity.Principal{Scope: "connector"})))
 	}))
-	defer remote.Close()
-	proxy, err := NewProxy(context.Background(), Credential{Endpoint: remote.URL + "/v1/mcp", Token: token}, remote.Client())
+	defer runtime.Close()
+
+	proxy, err := NewProxy(Credential{Endpoint: runtime.URL, Token: localTestToken})
 	if err != nil {
 		t.Fatalf("NewProxy() error = %v", err)
 	}
-	defer proxy.Close()
-	local := httptest.NewServer(proxy.Handler())
-	defer local.Close()
-	client := mcp.NewClient(&mcp.Implementation{Name: "proxy-test", Version: "0.1.0"}, nil)
-	transport := &mcp.StreamableClientTransport{Endpoint: local.URL, MaxRetries: -1, DisableStandaloneSSE: true}
-	session, err := client.Connect(context.Background(), transport, nil)
-	if err != nil {
-		t.Fatalf("local Connect() error = %v", err)
+	if manifestCalls.Load() != 0 || assetCalls.Load() != 0 {
+		t.Fatal("NewProxy() connected to the runtime during construction")
 	}
-	defer session.Close()
+	session := connectProxyTestSession(t, proxy)
 	tools, err := session.ListTools(context.Background(), nil)
-	if err != nil || len(tools.Tools) != 1 || tools.Tools[0].Name != "get_latest_paste" {
-		t.Fatalf("proxy tools/error = %#v/%v", tools, err)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
 	}
+	if len(tools.Tools) != 1 || tools.Tools[0].Name != "get_latest_paste" || tools.Tools[0].Description != "Retrieve the current MCPaste context." {
+		t.Fatalf("tools = %#v", tools.Tools)
+	}
+
 	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_latest_paste"})
-	if err != nil || result.IsError || len(result.Content) != 1 {
-		t.Fatalf("proxy result/error = %#v/%v", result, err)
+	if err != nil || result.IsError {
+		t.Fatalf("CallTool() result/error = %#v/%v", result, err)
+	}
+	if len(result.Content) != 3 {
+		t.Fatalf("content count = %d, want 3", len(result.Content))
 	}
 	text, ok := result.Content[0].(*mcp.TextContent)
-	if !ok || text.Text != "proxy exact text\r\n끝" {
-		t.Fatalf("proxy text = %#v", result.Content[0])
+	if !ok || text.Text != manifest.Text {
+		t.Fatalf("text content = %#v", result.Content[0])
+	}
+	for index, want := range []struct {
+		data []byte
+		mime string
+	}{{first, "image/png"}, {second, "image/jpeg"}} {
+		image, ok := result.Content[index+1].(*mcp.ImageContent)
+		if !ok || !bytes.Equal(image.Data, want.data) || image.MIMEType != want.mime {
+			t.Fatalf("image %d = %#v", index, result.Content[index+1])
+		}
+	}
+	structured, ok := result.StructuredContent.(map[string]any)
+	if !ok || structured["available"] != true || structured["source_device_id"] != manifest.SourceDeviceID {
+		t.Fatalf("structured content = %#v", result.StructuredContent)
+	}
+	revision, ok := structured["revision"].(map[string]any)
+	if !ok || revision["device_id"] != manifest.Revision.DeviceID || revision["wall_millis"] != float64(manifest.Revision.WallMillis) {
+		t.Fatalf("structured revision = %#v", structured["revision"])
+	}
+	assets, ok := structured["assets"].([]any)
+	if !ok || len(assets) != 2 {
+		t.Fatalf("structured assets = %#v", structured["assets"])
+	}
+	if manifestCalls.Load() != 1 || assetCalls.Load() != 2 {
+		t.Fatalf("manifest/asset calls = %d/%d, want 1/2", manifestCalls.Load(), assetCalls.Load())
 	}
 }
 
-func TestProxyRejectsRedirectsBeforeSendingCredentialToAnotherHost(t *testing.T) {
-	const token = "example-token-not-real"
-	redirect := httptest.NewServer(http.RedirectHandler("https://example.com/v1/mcp", http.StatusTemporaryRedirect))
-	defer redirect.Close()
-	proxy, err := NewProxy(context.Background(), Credential{Endpoint: redirect.URL + "/v1/mcp", Token: token}, redirect.Client())
-	if err == nil || proxy != nil {
-		t.Fatal("NewProxy() unexpectedly followed a redirect")
+func TestProxyReturnsFixedUnavailableResultsWithoutSensitiveDetails(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.Handler
+		close   bool
+	}{
+		{name: "no context", handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })},
+		{name: "source offline", handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			manifest := localTestManifest("stale secret")
+			manifest.SourceReachable = false
+			writeLocalJSON(t, w, http.StatusOK, manifest)
+		})},
+		{name: "invalid response", handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"unknown":true}`))
+		})},
+		{name: "app absent", handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeLocalJSON(t, w, http.StatusOK, localTestManifest("never read"))
+		}), close: true},
 	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const secretToken = "fixed-result-secret-token-not-real"
+			runtime := httptest.NewServer(test.handler)
+			proxy, err := NewProxy(Credential{Endpoint: runtime.URL, Token: secretToken})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.close {
+				runtime.Close()
+			} else {
+				defer runtime.Close()
+			}
+			session := connectProxyTestSession(t, proxy)
+			result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_latest_paste"})
+			if err != nil || !result.IsError || len(result.Content) != 1 {
+				t.Fatalf("CallTool() result/error = %#v/%v", result, err)
+			}
+			content, ok := result.Content[0].(*mcp.TextContent)
+			if !ok {
+				t.Fatalf("error content = %#v", result.Content[0])
+			}
+			want := "MCPaste context unavailable."
+			if test.name == "invalid response" {
+				want = "MCPaste context error."
+			}
+			if content.Text != want {
+				t.Fatalf("error text = %q, want %q", content.Text, want)
+			}
+			structured, ok := result.StructuredContent.(map[string]any)
+			if !ok || len(structured) != 1 || structured["available"] != false {
+				t.Fatalf("structured error = %#v", result.StructuredContent)
+			}
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), secretToken) || strings.Contains(string(encoded), runtime.URL) || strings.Contains(string(encoded), "stale secret") {
+				t.Fatalf("result leaked sensitive details: %s", encoded)
+			}
+		})
+	}
+}
+
+func connectProxyTestSession(t *testing.T, proxy *Proxy) *mcp.ClientSession {
+	t.Helper()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := proxy.Server().Connect(context.Background(), serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server Connect() error = %v", err)
+	}
+	t.Cleanup(func() { _ = serverSession.Close() })
+	client := mcp.NewClient(&mcp.Implementation{Name: "local-proxy-test", Version: "0.1.0"}, nil)
+	session, err := client.Connect(context.Background(), clientTransport, nil)
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	return session
 }

@@ -4,44 +4,71 @@ on:
   workflow_call:
     inputs:
       tag:
-        description: Git tag whose GitHub release receives the macOS artifacts.
+        description: Git tag whose GitHub Release receives the macOS app.
         required: true
         type: string
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing Git tag whose GitHub release receives the macOS artifacts.
+        description: Existing Git tag whose GitHub Release receives the macOS app.
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   macos:
     runs-on: macos-14
     environment: release
     timeout-minutes: 35
-    env:
-      MCPASTE_ENDPOINT: ${{ vars.MCPASTE_ENDPOINT }}
+    permissions:
+      contents: write
     steps:
-      - name: Check out repository
+      - name: Check out tagged commit
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: refs/tags/${{ inputs.tag }}
           persist-credentials: false
+
+      - name: Verify release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) printf '%s\n' 'macOS release requires a v* tag.' >&2; exit 1 ;;
+          esac
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+          gh release view "$RELEASE_TAG" >/dev/null
+
       - name: Select Xcode
         run: sudo xcode-select --switch /Applications/Xcode_15.4.app
+
       - name: Set up Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: .go-version
           cache: false
-      - name: Test package
-        working-directory: macos/MCPaste
+
+      - name: Generate third-party license archive
         run: |
-          ../../scripts/configure-endpoint.sh
-          swift test
+          licenses="$RUNNER_TEMP/THIRD_PARTY_LICENSES"
+          go run github.com/google/go-licenses@v1.6.0 save ./cmd/mcpaste \
+            --ignore github.com/1yoouoo/mcpaste \
+            --save_path "$licenses"
+          test -n "$(find "$licenses" -type f -print -quit)"
+          test -z "$(find "$licenses" -type f -empty -print -quit)"
+          tar -czf "$RUNNER_TEMP/THIRD_PARTY_LICENSES.tar.gz" \
+            -C "$RUNNER_TEMP" THIRD_PARTY_LICENSES
+          test -s "$RUNNER_TEMP/THIRD_PARTY_LICENSES.tar.gz"
+
+      - name: Test Swift package
+        working-directory: macos/MCPaste
+        run: swift test
+
       - name: Import signing certificate
         env:
           SIGNING_CERTIFICATE_BASE64: ${{ secrets.MACOS_SIGNING_CERTIFICATE_BASE64 }}
@@ -58,7 +85,8 @@ jobs:
           printf '%s' "$SIGNING_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/signing.p12"
           security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$SIGNING_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security list-keychains -d user -s "$keychain"
-      - name: Archive and notarize
+
+      - name: Build, sign, and notarize app
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
@@ -66,18 +94,59 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_NOTARIZATION_APP_PASSWORD }}
         working-directory: macos/MCPaste
         run: |
-          swift build -c release --product MCPaste
+          swift_arm_scratch="$RUNNER_TEMP/mcpaste-swift-arm64"
+          swift_x86_scratch="$RUNNER_TEMP/mcpaste-swift-x86_64"
+          swift build -c release --product MCPaste \
+            --triple arm64-apple-macosx14.0 \
+            --scratch-path "$swift_arm_scratch"
+          swift build -c release --product MCPaste \
+            --triple x86_64-apple-macosx14.0 \
+            --scratch-path "$swift_x86_scratch"
+          swift_arm_bin="$(swift build -c release --product MCPaste \
+            --triple arm64-apple-macosx14.0 \
+            --scratch-path "$swift_arm_scratch" \
+            --show-bin-path)"
+          swift_x86_bin="$(swift build -c release --product MCPaste \
+            --triple x86_64-apple-macosx14.0 \
+            --scratch-path "$swift_x86_scratch" \
+            --show-bin-path)"
+          arm_bundle="$swift_arm_bin/MCPaste_MCPasteApp.bundle"
+          x86_bundle="$swift_x86_bin/MCPaste_MCPasteApp.bundle"
+          test -d "$arm_bundle"
+          test -d "$x86_bundle"
+          diff -qr "$arm_bundle" "$x86_bundle"
+
           app="$RUNNER_TEMP/MCPaste.app"
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          bin_path="$(swift build -c release --show-bin-path)"
-          cp "$bin_path/MCPaste" "$app/Contents/MacOS/MCPaste"
-          cp -R "$bin_path/MCPaste_MCPasteApp.bundle" "$app/Contents/Resources/"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Helpers"
+          lipo -create \
+            "$swift_arm_bin/MCPaste" \
+            "$swift_x86_bin/MCPaste" \
+            -output "$app/Contents/MacOS/MCPaste"
+          cp -R "$arm_bundle" "$app/Contents/Resources/"
           cp Resources/Info.plist "$app/Contents/Info.plist"
-          # Embed the connector CLI so the app can pair and register AI tools
-          # itself. It goes in Contents/Helpers: Contents/MacOS/mcpaste would
-          # overwrite the MCPaste app binary on case-insensitive filesystems.
-          mkdir -p "$app/Contents/Helpers"
-          (cd "$GITHUB_WORKSPACE" && GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X=github.com/1yoouoo/mcpaste/internal/connector.BuildEndpoint=$MCPASTE_ENDPOINT" -o "$app/Contents/Helpers/mcpaste" ./cmd/mcpaste)
+
+          helper_arm="$RUNNER_TEMP/mcpaste-helper-arm64"
+          helper_x86="$RUNNER_TEMP/mcpaste-helper-x86_64"
+          (cd "$GITHUB_WORKSPACE" && \
+            GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
+            go build -trimpath -o "$helper_arm" ./cmd/mcpaste)
+          (cd "$GITHUB_WORKSPACE" && \
+            GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 \
+            go build -trimpath -o "$helper_x86" ./cmd/mcpaste)
+          lipo -create "$helper_arm" "$helper_x86" \
+            -output "$app/Contents/Helpers/mcpaste"
+
+          assert_universal() {
+            binary="$1"
+            architectures="$(lipo -archs "$binary" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort | paste -sd ' ' -)"
+            if [ "$architectures" != 'arm64 x86_64' ]; then
+              printf '%s\n' "$binary has unexpected architectures: $architectures" >&2
+              exit 1
+            fi
+          }
+          assert_universal "$app/Contents/MacOS/MCPaste"
+          assert_universal "$app/Contents/Helpers/mcpaste"
+
           if [ -n "$SIGNING_IDENTITY" ]; then
             codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app/Contents/Helpers/mcpaste"
             codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app"
@@ -86,9 +155,6 @@ jobs:
             xcrun stapler staple "$app"
             artifact=MCPaste-final.zip
           else
-            # No Apple credentials: ad-hoc sign. Terminal (curl) downloads carry no
-            # quarantine attribute, so Gatekeeper never evaluates the app; browser
-            # downloads of this artifact are blocked as unverified.
             codesign --force --sign - "$app/Contents/Helpers/mcpaste"
             codesign --force --deep --sign - "$app"
             artifact=MCPaste-adhoc.zip
@@ -97,19 +163,14 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/$artifact"
           (cd "$RUNNER_TEMP" && shasum -a 256 "$artifact" > macOS-SHA256SUMS)
           cp "$GITHUB_WORKSPACE/THIRD_PARTY_NOTICES.md" "$RUNNER_TEMP/THIRD_PARTY_NOTICES.md"
-      - name: Publish macOS artifact
+
+      - name: Upload macOS app
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          case "$RELEASE_TAG" in
-            v*) ;;
-            *) printf '%s\n' 'macOS release requires a v* tag.' >&2; exit 1 ;;
-          esac
-          git check-ref-format "refs/tags/$RELEASE_TAG"
-          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
-          gh release view "$RELEASE_TAG" >/dev/null
           gh release upload "$RELEASE_TAG" --clobber \
             "$RUNNER_TEMP"/MCPaste-*.zip \
             "$RUNNER_TEMP/macOS-SHA256SUMS" \
-            "$RUNNER_TEMP/THIRD_PARTY_NOTICES.md"
+            "$RUNNER_TEMP/THIRD_PARTY_NOTICES.md" \
+            "$RUNNER_TEMP/THIRD_PARTY_LICENSES.tar.gz"

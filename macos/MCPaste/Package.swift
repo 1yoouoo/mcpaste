@@ -9,8 +9,7 @@ let package = Package(
         .executable(name: "MCPaste", targets: ["MCPasteApp"])
     ],
     targets: [
-        .systemLibrary(name: "CSQLite", path: "Sources/CSQLite"),
-        .target(name: "MCPasteCore", dependencies: ["CSQLite"]),
+        .target(name: "MCPasteCore"),
         .executableTarget(
             name: "MCPasteApp",
             dependencies: ["MCPasteCore"],

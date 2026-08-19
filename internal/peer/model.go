@@ -9,6 +9,9 @@ const (
 	MaxAssets       = 8
 	MaxAssetBytes   = 8 << 20
 	MaxBundleBytes  = 32 << 20
+	// MaxContextJSONBytes allows MaxTextBytes to be encoded entirely as
+	// six-byte JSON Unicode escapes, with bounded room for context metadata.
+	MaxContextJSONBytes = MaxTextBytes*6 + 64<<10
 )
 
 type Revision struct {
@@ -60,6 +63,7 @@ type SyncState string
 
 const (
 	SyncUpToDate      SyncState = "up_to_date"
+	SyncUpdating      SyncState = "updating"
 	SyncWaiting       SyncState = "waiting_to_sync"
 	SyncSourceOffline SyncState = "source_offline"
 )
@@ -68,6 +72,11 @@ type LocalContextResponse struct {
 	ContextManifest
 	SourceReachable bool      `json:"source_reachable"`
 	SyncState       SyncState `json:"sync_state"`
+}
+
+type PublicationResult struct {
+	Revision  Revision  `json:"revision"`
+	SyncState SyncState `json:"sync_state"`
 }
 
 type Snapshot struct {

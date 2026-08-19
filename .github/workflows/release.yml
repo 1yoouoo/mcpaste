@@ -1,53 +1,48 @@
-name: Linux release
+name: macOS release
 
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  linux:
+  github-release:
+    name: Create or verify GitHub Release
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    env:
-      MCPASTE_ENDPOINT: ${{ vars.MCPASTE_ENDPOINT }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
-      - name: Check out repository
+      - name: Check out tagged commit
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: refs/tags/${{ github.ref_name }}
           persist-credentials: false
-      - name: Set up Go
-        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
-        with:
-          go-version-file: .go-version
-          cache: false
-      - name: Build Linux artifacts
-        run: |
-          mkdir -p dist
-          for arch in amd64 arm64; do
-            GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X=github.com/1yoouoo/mcpaste/internal/connector.BuildEndpoint=$MCPASTE_ENDPOINT" -o "dist/mcpaste-$arch" ./cmd/mcpaste
-            GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "dist/mcpaste-server-$arch" ./cmd/server
-            GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "dist/mcpaste-migrate-$arch" ./cmd/migrate
-          done
-          go run github.com/google/go-licenses@v1.6.0 save ./... --ignore github.com/1yoouoo/mcpaste --save_path "$RUNNER_TEMP/THIRD_PARTY_LICENSES"
-          tar -czf dist/THIRD_PARTY_LICENSES.tar.gz -C "$RUNNER_TEMP" THIRD_PARTY_LICENSES
-          (cd dist && shasum -a 256 * > Linux-SHA256SUMS)
-      - name: Build macOS CLI artifacts
-        run: |
-          for arch in amd64 arm64; do
-            GOOS=darwin GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X=github.com/1yoouoo/mcpaste/internal/connector.BuildEndpoint=$MCPASTE_ENDPOINT" -o "dist/mcpaste-darwin-$arch" ./cmd/mcpaste
-          done
-          (cd dist && shasum -a 256 mcpaste-darwin-amd64 mcpaste-darwin-arm64 > Darwin-SHA256SUMS)
-      - name: Publish verified release
+
+      - name: Create or verify release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) printf '%s\n' 'Release requires a v* tag.' >&2; exit 1 ;;
+          esac
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            test "$(gh release view "$RELEASE_TAG" --json tagName --jq .tagName)" = "$RELEASE_TAG"
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes
+          fi
 
   macos:
-    name: macOS release
-    needs: linux
+    name: Build and upload macOS app
+    needs: github-release
+    permissions:
+      contents: write
     uses: ./.github/workflows/macos-release.yml
     with:
       tag: ${{ github.ref_name }}

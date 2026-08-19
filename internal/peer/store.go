@@ -17,6 +17,7 @@ var (
 	ErrInvalidStoreConfig = errors.New("invalid store configuration")
 	ErrProtocolMismatch   = errors.New("protocol version mismatch")
 	ErrInvalidRevision    = errors.New("invalid context revision")
+	ErrRevisionConflict   = errors.New("context revision conflict")
 )
 
 type limitExceededError struct{}
@@ -32,8 +33,9 @@ func (limitExceededError) Unwrap() []error {
 var errLimitExceeded error = limitExceededError{}
 
 type LocalUpdate struct {
-	Text         string   `json:"text"`
-	AssetDigests []string `json:"asset_digests"`
+	Text             string
+	AssetDigests     []string
+	ExpectedRevision *Revision
 }
 
 type stagedAsset struct {
@@ -114,6 +116,9 @@ func (s *Store) PublishLocal(update LocalUpdate) (ContextManifest, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !expectedRevisionMatches(update.ExpectedRevision, s.current) {
+		return ContextManifest{}, ErrRevisionConflict
+	}
 
 	assets := make([]AssetManifest, 0, len(update.AssetDigests))
 	assetBytes := make(map[string][]byte, len(update.AssetDigests))
@@ -152,6 +157,13 @@ func (s *Store) PublishLocal(update LocalUpdate) (ContextManifest, error) {
 		s.removeStagedLocked(digest)
 	}
 	return manifest, nil
+}
+
+func expectedRevisionMatches(expected *Revision, current *Snapshot) bool {
+	if expected == nil {
+		return current == nil
+	}
+	return current != nil && *expected == current.Manifest.Revision
 }
 
 func (s *Store) AdoptRemote(manifest ContextManifest, assets map[string][]byte) error {

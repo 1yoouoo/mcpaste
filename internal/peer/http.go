@@ -3,6 +3,7 @@ package peer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -21,7 +22,7 @@ import (
 
 const (
 	maxAnnounceBodyBytes   = 4 << 10
-	maxLocalContextBody    = MaxTextBytes + MaxAssets*64 + 8<<10
+	maxLocalContextBody    = MaxContextJSONBytes
 	localContextRoute      = "/v1/local/context"
 	peerContextRoute       = "/v1/context"
 	localContextAssetsBase = "/v1/local/context/assets/"
@@ -37,13 +38,14 @@ var (
 
 // HandlerOptions supplies the in-memory peer runtime dependencies.
 type HandlerOptions struct {
-	Store        *Store
-	Registry     *Registry
-	LocalDevice  KnownPeer
-	LocalToken   string
-	AllowedPeers *AllowedPeerIPs
-	SyncState    func() SyncState
-	Announce     func(context.Context, Revision) error
+	Store          *Store
+	Registry       *Registry
+	LocalDevice    KnownPeer
+	LocalToken     string
+	AllowedPeers   *AllowedPeerIPs
+	ReachablePeers *AllowedPeerIPs
+	SyncState      func() SyncState
+	Announce       func(context.Context, Revision) error
 }
 
 // AllowedPeerIPs is an immutable address snapshot swapped atomically under a
@@ -98,11 +100,38 @@ func NewHTTPServer(addr string, handler http.Handler) *http.Server {
 }
 
 type httpHandler struct {
-	options HandlerOptions
+	options              HandlerOptions
+	localTokenDigest     [sha256.Size]byte
+	localTokenConfigured bool
+	announceMu           sync.Mutex
+	announceActive       *announceCall
+}
+
+type announceCall struct {
+	revision     Revision
+	publicDone   chan struct{}
+	callbackDone chan struct{}
+	resultOnce   sync.Once
+	resultErr    error
+	followers    int
+}
+
+func (call *announceCall) resolvePublicResult(err error) {
+	call.resultOnce.Do(func() {
+		call.resultErr = err
+		close(call.publicDone)
+	})
 }
 
 func NewHandler(options HandlerOptions) http.Handler {
-	return &httpHandler{options: options}
+	configured := options.LocalToken != ""
+	digest := sha256.Sum256([]byte("Bearer " + options.LocalToken))
+	options.LocalToken = ""
+	return &httpHandler{
+		options:              options,
+		localTokenDigest:     digest,
+		localTokenConfigured: configured,
+	}
 }
 
 type httpRouteKind uint8
@@ -126,21 +155,29 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, http.StatusNotFound)
 		return
 	}
-	if r.Method != route.method {
-		writeHTTPError(w, http.StatusMethodNotAllowed)
-		return
-	}
-	if h == nil || !h.validConfiguration() {
-		writeHTTPError(w, http.StatusServiceUnavailable)
+	if h == nil {
+		if route.kind == httpLocalRoute {
+			writeHTTPError(w, http.StatusUnauthorized)
+		} else {
+			writeHTTPError(w, http.StatusForbidden)
+		}
 		return
 	}
 	if route.kind == httpLocalRoute {
-		if !authorizedLocalRequest(r, h.options.LocalToken) {
+		if !authorizedLocalRequest(r, h.localTokenDigest, h.localTokenConfigured) {
 			writeHTTPError(w, http.StatusUnauthorized)
 			return
 		}
 	} else if !authorizedPeerRequest(r, h.options.AllowedPeers) {
 		writeHTTPError(w, http.StatusForbidden)
+		return
+	}
+	if r.Method != route.method {
+		writeHTTPError(w, http.StatusMethodNotAllowed)
+		return
+	}
+	if !h.validConfiguration() {
+		writeHTTPError(w, http.StatusServiceUnavailable)
 		return
 	}
 
@@ -176,7 +213,11 @@ func matchHTTPRoute(r *http.Request) (httpRoute, bool) {
 	}
 	switch r.URL.Path {
 	case "/v1/health":
-		return httpRoute{kind: httpPeerRoute, method: http.MethodGet, value: "health"}, true
+		kind := httpPeerRoute
+		if address, valid := parseRemoteAddress(r.RemoteAddr); valid && address.IsLoopback() {
+			kind = httpLocalRoute
+		}
+		return httpRoute{kind: kind, method: http.MethodGet, value: "health"}, true
 	case peerContextRoute:
 		return httpRoute{kind: httpPeerRoute, method: http.MethodGet, value: "context"}, true
 	case "/v1/announce":
@@ -265,7 +306,7 @@ func (h *httpHandler) validConfiguration() bool {
 		return false
 	}
 	o := h.options
-	return o.Store != nil && o.Registry != nil && o.AllowedPeers != nil && o.Announce != nil &&
+	return o.Store != nil && o.Registry != nil && o.AllowedPeers != nil && o.ReachablePeers != nil && o.SyncState != nil && o.Announce != nil &&
 		o.LocalDevice.DeviceID != "" && o.LocalDevice.DisplayName != "" && validHTTPStore(o.Store)
 }
 
@@ -273,8 +314,8 @@ func validHTTPStore(store *Store) bool {
 	return store != nil && store.clock != nil && store.now != nil && store.localDeviceID != ""
 }
 
-func authorizedLocalRequest(r *http.Request, token string) bool {
-	if token == "" || r == nil {
+func authorizedLocalRequest(r *http.Request, expected [sha256.Size]byte, configured bool) bool {
+	if !configured || r == nil {
 		return false
 	}
 	address, ok := parseRemoteAddress(r.RemoteAddr)
@@ -285,8 +326,8 @@ func authorizedLocalRequest(r *http.Request, token string) bool {
 	if len(values) != 1 {
 		return false
 	}
-	expected := "Bearer " + token
-	return subtle.ConstantTimeCompare([]byte(values[0]), []byte(expected)) == 1
+	supplied := sha256.Sum256([]byte(values[0]))
+	return subtle.ConstantTimeCompare(expected[:], supplied[:]) == 1
 }
 
 func authorizedPeerRequest(r *http.Request, allowed *AllowedPeerIPs) bool {
@@ -322,19 +363,36 @@ func requestHeaderValues(header http.Header, name string) []string {
 	return values
 }
 
-func (s *Store) httpSnapshot() (Snapshot, bool, error) {
+func (s *Store) httpManifest() (ContextManifest, bool, error) {
 	if s == nil {
-		return Snapshot{}, false, ErrInvalidStoreConfig
+		return ContextManifest{}, false, ErrInvalidStoreConfig
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.current == nil {
-		return Snapshot{}, s.sourceReachable, ErrNoContext
+		return ContextManifest{}, s.sourceReachable, ErrNoContext
 	}
-	return Snapshot{
-		Manifest: cloneManifest(s.current.Manifest),
-		Assets:   cloneBytesMap(s.current.Assets),
-	}, s.sourceReachable, nil
+	return cloneManifest(s.current.Manifest), s.sourceReachable, nil
+}
+
+func (s *Store) httpAsset(index int) (AssetManifest, []byte, bool, error) {
+	if s == nil {
+		return AssetManifest{}, nil, false, ErrInvalidStoreConfig
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.current == nil {
+		return AssetManifest{}, nil, false, ErrNoContext
+	}
+	if index < 0 || index >= len(s.current.Manifest.Assets) {
+		return AssetManifest{}, nil, false, nil
+	}
+	manifest := s.current.Manifest.Assets[index]
+	data, ok := s.current.Assets[manifest.Digest]
+	if !ok {
+		return AssetManifest{}, nil, false, nil
+	}
+	return manifest, cloneBytes(data), true, nil
 }
 
 type healthResponse struct {
@@ -347,7 +405,7 @@ type healthResponse struct {
 }
 
 func (h *httpHandler) serveHealth(w http.ResponseWriter) {
-	snapshot, _, err := h.options.Store.httpSnapshot()
+	manifest, _, err := h.options.Store.httpManifest()
 	hasContext := err == nil
 	if err != nil && !errors.Is(err, ErrNoContext) {
 		writeHTTPError(w, http.StatusServiceUnavailable)
@@ -360,14 +418,14 @@ func (h *httpHandler) serveHealth(w http.ResponseWriter) {
 		HasContext:      hasContext,
 	}
 	if hasContext {
-		response.SourceDeviceID = snapshot.Manifest.SourceDeviceID
-		response.Revision = snapshot.Manifest.Revision
+		response.SourceDeviceID = manifest.SourceDeviceID
+		response.Revision = manifest.Revision
 	}
 	writeHTTPJSON(w, http.StatusOK, response)
 }
 
 func (h *httpHandler) serveContext(w http.ResponseWriter) {
-	snapshot, _, err := h.options.Store.httpSnapshot()
+	manifest, _, err := h.options.Store.httpManifest()
 	if errors.Is(err, ErrNoContext) {
 		writeHTTPError(w, http.StatusNotFound)
 		return
@@ -376,7 +434,7 @@ func (h *httpHandler) serveContext(w http.ResponseWriter) {
 		writeHTTPError(w, http.StatusServiceUnavailable)
 		return
 	}
-	writeHTTPJSON(w, http.StatusOK, snapshot.Manifest)
+	writeHTTPJSON(w, http.StatusOK, manifest)
 }
 
 func (h *httpHandler) serveContextAsset(w http.ResponseWriter, index int) {
@@ -388,7 +446,7 @@ func (h *httpHandler) serveLocalContextAsset(w http.ResponseWriter, index int) {
 }
 
 func (h *httpHandler) serveSnapshotAsset(w http.ResponseWriter, index int) {
-	snapshot, _, err := h.options.Store.httpSnapshot()
+	manifest, data, ok, err := h.options.Store.httpAsset(index)
 	if errors.Is(err, ErrNoContext) {
 		writeHTTPError(w, http.StatusNotFound)
 		return
@@ -397,13 +455,11 @@ func (h *httpHandler) serveSnapshotAsset(w http.ResponseWriter, index int) {
 		writeHTTPError(w, http.StatusServiceUnavailable)
 		return
 	}
-	if index < 0 || index >= len(snapshot.Manifest.Assets) {
+	if !ok {
 		writeHTTPError(w, http.StatusNotFound)
 		return
 	}
-	manifest := snapshot.Manifest.Assets[index]
-	data, ok := snapshot.Assets[manifest.Digest]
-	if !ok || len(data) != manifest.ByteSize {
+	if len(data) != manifest.ByteSize {
 		writeHTTPError(w, http.StatusServiceUnavailable)
 		return
 	}
@@ -415,7 +471,7 @@ func (h *httpHandler) serveSnapshotAsset(w http.ResponseWriter, index int) {
 }
 
 func (h *httpHandler) serveLocalContext(w http.ResponseWriter) {
-	snapshot, sourceReachable, err := h.options.Store.httpSnapshot()
+	manifest, sourceReachable, err := h.options.Store.httpManifest()
 	if errors.Is(err, ErrNoContext) {
 		writeHTTPError(w, http.StatusNotFound)
 		return
@@ -430,25 +486,34 @@ func (h *httpHandler) serveLocalContext(w http.ResponseWriter) {
 		return
 	}
 	writeHTTPJSON(w, http.StatusOK, LocalContextResponse{
-		ContextManifest: snapshot.Manifest,
+		ContextManifest: manifest,
 		SourceReachable: sourceReachable,
 		SyncState:       syncState,
 	})
 }
 
 func (h *httpHandler) syncState(sourceReachable bool) (state SyncState, ok bool) {
-	if !sourceReachable {
-		return SyncSourceOffline, true
-	}
 	if h.options.SyncState == nil {
-		return SyncUpToDate, true
+		return "", false
 	}
 	defer func() {
 		if recover() != nil {
 			ok = false
 		}
 	}()
-	return h.options.SyncState(), true
+	state = h.options.SyncState()
+	switch state {
+	case SyncUpToDate, SyncUpdating, SyncWaiting, SyncSourceOffline:
+	default:
+		return "", false
+	}
+	if !sourceReachable {
+		return SyncSourceOffline, true
+	}
+	if state == SyncSourceOffline {
+		return SyncWaiting, true
+	}
+	return state, true
 }
 
 func (h *httpHandler) serveLocalContextUpdate(w http.ResponseWriter, r *http.Request) {
@@ -456,25 +521,71 @@ func (h *httpHandler) serveLocalContextUpdate(w http.ResponseWriter, r *http.Req
 		writeHTTPError(w, http.StatusBadRequest)
 		return
 	}
-	var update LocalUpdate
-	if err := decodeHTTPObject(w, r, maxLocalContextBody, &update); err != nil {
+	var wire localUpdateRequest
+	if err := decodeHTTPObject(w, r, maxLocalContextBody, &wire); err != nil {
 		writeHTTPError(w, statusForBodyError(err))
 		return
 	}
-	if _, err := safePublishLocal(h.options.Store, update); err != nil {
+	update, err := wire.update()
+	if err != nil {
+		writeHTTPError(w, http.StatusBadRequest)
+		return
+	}
+	syncState, ok := h.syncState(true)
+	if !ok {
+		writeHTTPError(w, http.StatusServiceUnavailable)
+		return
+	}
+	manifest, err := safePublishLocal(h.options.Store, update)
+	if err != nil {
 		switch {
 		case errors.Is(err, ErrLimitExceeded):
 			writeHTTPError(w, http.StatusRequestEntityTooLarge)
 		case errors.Is(err, ErrInvalidAsset):
 			writeHTTPError(w, http.StatusBadRequest)
-		case errors.Is(err, ErrClockExhausted):
+		case errors.Is(err, ErrClockExhausted), errors.Is(err, ErrRevisionConflict):
 			writeHTTPError(w, http.StatusConflict)
 		default:
 			writeHTTPError(w, http.StatusServiceUnavailable)
 		}
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeHTTPJSON(w, http.StatusOK, PublicationResult{Revision: manifest.Revision, SyncState: syncState})
+}
+
+type localUpdateRequest struct {
+	Text             string          `json:"text"`
+	AssetDigests     []string        `json:"asset_digests"`
+	ExpectedRevision json.RawMessage `json:"expected_revision"`
+}
+
+func (request localUpdateRequest) update() (LocalUpdate, error) {
+	if request.ExpectedRevision == nil {
+		return LocalUpdate{}, errHTTPInvalidBody
+	}
+	trimmed := bytes.TrimSpace(request.ExpectedRevision)
+	var expected *Revision
+	if !bytes.Equal(trimmed, []byte("null")) {
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			return LocalUpdate{}, errHTTPInvalidBody
+		}
+		var revision Revision
+		decoder := json.NewDecoder(bytes.NewReader(trimmed))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&revision); err != nil || revision.DeviceID == "" || revision.WallMillis == math.MaxInt64 {
+			return LocalUpdate{}, errHTTPInvalidBody
+		}
+		var trailing json.RawMessage
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			return LocalUpdate{}, errHTTPInvalidBody
+		}
+		expected = &revision
+	}
+	return LocalUpdate{
+		Text:             request.Text,
+		AssetDigests:     request.AssetDigests,
+		ExpectedRevision: expected,
+	}, nil
 }
 
 func safePublishLocal(store *Store, update LocalUpdate) (manifest ContextManifest, err error) {
@@ -642,17 +753,21 @@ func (h *httpHandler) serveAnnounce(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, http.StatusBadRequest)
 		return
 	}
-	snapshot, _, err := h.options.Store.httpSnapshot()
+	if revisionTooFarAhead(envelope.Revision.WallMillis, h.options.Store.now().UnixMilli()) {
+		writeHTTPError(w, http.StatusBadRequest)
+		return
+	}
+	manifest, _, err := h.options.Store.httpManifest()
 	hasCurrent := err == nil
 	if err != nil && !errors.Is(err, ErrNoContext) {
 		writeHTTPError(w, http.StatusServiceUnavailable)
 		return
 	}
-	if hasCurrent && envelope.Revision.Compare(snapshot.Manifest.Revision) <= 0 {
+	if hasCurrent && envelope.Revision.Compare(manifest.Revision) <= 0 {
 		writeHTTPError(w, http.StatusConflict)
 		return
 	}
-	if err := safeAnnounce(h.options.Announce, r.Context(), envelope.Revision); err != nil {
+	if err := h.invokeAnnounce(r.Context(), envelope.Revision); err != nil {
 		writeHTTPError(w, http.StatusServiceUnavailable)
 		return
 	}
@@ -668,8 +783,62 @@ func safeAnnounce(callback func(context.Context, Revision) error, ctx context.Co
 	return callback(ctx, revision)
 }
 
+func (h *httpHandler) invokeAnnounce(requestContext context.Context, revision Revision) error {
+	h.announceMu.Lock()
+	call := h.announceActive
+	if call != nil {
+		if call.revision != revision {
+			h.announceMu.Unlock()
+			return errHTTPOperation
+		}
+		call.followers++
+		h.announceMu.Unlock()
+		return waitForAnnounce(call, requestContext)
+	}
+	call = &announceCall{
+		revision:     revision,
+		publicDone:   make(chan struct{}),
+		callbackDone: make(chan struct{}),
+	}
+	h.announceActive = call
+	callback := h.options.Announce
+	h.announceMu.Unlock()
+
+	deadline := time.Now().Add(2 * time.Second)
+	callbackContext, cancel := context.WithDeadline(context.Background(), deadline)
+	deadlineTimer := time.AfterFunc(time.Until(deadline), func() {
+		call.resolvePublicResult(errHTTPOperation)
+		cancel()
+	})
+	go func() {
+		err := safeAnnounce(callback, callbackContext, revision)
+		if callbackContext.Err() != nil {
+			err = errHTTPOperation
+		}
+		deadlineTimer.Stop()
+		cancel()
+		h.announceMu.Lock()
+		if h.announceActive == call {
+			h.announceActive = nil
+		}
+		call.resolvePublicResult(err)
+		h.announceMu.Unlock()
+		close(call.callbackDone)
+	}()
+	return waitForAnnounce(call, requestContext)
+}
+
+func waitForAnnounce(call *announceCall, requestContext context.Context) error {
+	select {
+	case <-call.publicDone:
+		return call.resultErr
+	case <-requestContext.Done():
+		return errHTTPOperation
+	}
+}
+
 func (h *httpHandler) serveDevices(w http.ResponseWriter) {
-	snapshot, _, err := h.options.Store.httpSnapshot()
+	manifest, _, err := h.options.Store.httpManifest()
 	hasContext := err == nil
 	if err != nil && !errors.Is(err, ErrNoContext) {
 		writeHTTPError(w, http.StatusServiceUnavailable)
@@ -682,7 +851,7 @@ func (h *httpHandler) serveDevices(w http.ResponseWriter) {
 	}
 	currentSourceID := ""
 	if hasContext {
-		currentSourceID = snapshot.Manifest.SourceDeviceID
+		currentSourceID = manifest.SourceDeviceID
 	}
 	devices := make([]deviceResponse, 0, len(peers)+1)
 	local := h.options.LocalDevice
@@ -703,7 +872,7 @@ func (h *httpHandler) serveDevices(w http.ResponseWriter) {
 		devices = append(devices, deviceResponse{
 			ID:          peer.DeviceID,
 			DisplayName: peer.DisplayName,
-			Reachable:   peerReachable(peer, h.options.AllowedPeers),
+			Reachable:   peerReachable(peer, h.options.ReachablePeers),
 			IsLocal:     false,
 			IsSource:    hasContext && currentSourceID == peer.DeviceID,
 			LastSeenAt:  peer.LastSeenAt.UTC(),

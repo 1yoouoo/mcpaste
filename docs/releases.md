@@ -1,35 +1,54 @@
 # MCPaste releases
 
-## Linux artifacts
+Tagged `v*` releases publish a universal macOS app for arm64 and x86_64. The app bundle contains a universal Go helper at `Contents/Helpers/mcpaste`; the helper is not published as a separate artifact.
 
-Tagged releases build `mcpaste`, `mcpaste-server`, and `mcpaste-migrate` for Linux `amd64` and `arm64`, plus `Linux-SHA256SUMS` and a generated `THIRD_PARTY_LICENSES.tar.gz`. The same job also builds the CLI-only `mcpaste-darwin-amd64` and `mcpaste-darwin-arm64` (unsigned, verified through `Darwin-SHA256SUMS`; the signed and notarized artifact is the macOS app below):
+## Release flow
+
+The tag workflow checks out the tagged commit with pinned actions, creates the GitHub Release when absent, or verifies the existing Release when present. It then invokes the reusable macOS workflow with the same tag.
+
+The macOS workflow:
+
+1. verifies that the input is an existing `v*` tag at the checked-out commit and that its GitHub Release exists;
+2. generates the full dependency license texts for `./cmd/mcpaste` with pinned `go-licenses` after Go setup;
+3. runs the Swift test suite;
+4. builds the Swift executable separately for arm64 and x86_64, verifies the resource bundle is architecture-neutral, and combines the executables into one universal app;
+5. cross-builds `./cmd/mcpaste` for Darwin arm64 and amd64 with CGO disabled, then combines both helper executables;
+6. verifies that the app and embedded helper each contain exactly arm64 and x86_64 before signing;
+7. signs the helper before signing the app;
+8. notarizes and staples a Developer ID build when the protected Apple credentials are configured;
+9. otherwise applies an ad-hoc signature;
+10. uploads the app archive, `macOS-SHA256SUMS`, `THIRD_PARTY_NOTICES.md`, and `THIRD_PARTY_LICENSES.tar.gz` to the verified tag.
+
+No standalone helper is uploaded.
+
+## Artifacts
+
+- `MCPaste-final.zip`: Developer ID signed, notarized, and stapled universal app with its universal embedded helper
+- `MCPaste-adhoc.zip`: ad-hoc-signed universal fallback with its universal embedded helper when Apple credentials are absent
+- `macOS-SHA256SUMS`: checksum for the app archive produced by that run
+- `THIRD_PARTY_NOTICES.md`: notice index for dependencies embedded in the app
+- `THIRD_PARTY_LICENSES.tar.gz`: generated full license texts for the embedded helper's dependency graph
+
+The installer prefers `MCPaste-final.zip` and falls back to `MCPaste-adhoc.zip`. It verifies the selected archive against `macOS-SHA256SUMS` before replacing `/Applications/MCPaste.app`.
+
+## Verify a download
+
+Run these commands from the directory containing the downloaded files:
 
 ```sh
-sha256sum --check Linux-SHA256SUMS
-file mcpaste-amd64 mcpaste-arm64
-```
-
-The connector is read-only and must be configured with a connector credential, never a full credential.
-
-## macOS artifact
-
-The macOS release workflow runs Swift tests, archives with Developer ID signing, submits for notarization, staples the result, and publishes a checksum. The app bundle embeds the connector CLI at `Contents/Helpers/mcpaste` (built for `darwin/arm64` with the release endpoint baked in and signed with the same identity as the app); the app uses it to pair the Mac and register AI tools on first launch, and the install script links it to `/usr/local/bin/mcpaste`. It lives in `Contents/Helpers` because `Contents/MacOS/mcpaste` would collide with the `MCPaste` app binary on case-insensitive filesystems:
-
-```sh
-codesign --verify --deep --strict --verbose=2 /Applications/MCPaste.app
-spctl --assess --type execute --verbose=4 /Applications/MCPaste.app
-shasum -a 256 MCPaste-final.zip
 shasum -a 256 --check macOS-SHA256SUMS
+ditto -xk MCPaste-final.zip /tmp/mcpaste-release-check
+codesign --verify --deep --strict --verbose=2 /tmp/mcpaste-release-check/MCPaste.app
+spctl --assess --type execute --verbose=4 /tmp/mcpaste-release-check/MCPaste.app
+test -x /tmp/mcpaste-release-check/MCPaste.app/Contents/Helpers/mcpaste
+lipo -archs /tmp/mcpaste-release-check/MCPaste.app/Contents/MacOS/MCPaste
+lipo -archs /tmp/mcpaste-release-check/MCPaste.app/Contents/Helpers/mcpaste
 ```
 
-The macOS release also publishes `macOS-SHA256SUMS` and `THIRD_PARTY_NOTICES.md`.
+Both `lipo -archs` commands must report exactly `arm64` and `x86_64`; their printed order may differ.
 
-When the signing secrets are not configured, the workflow falls back to an ad-hoc signature and publishes `MCPaste-adhoc.zip` instead of `MCPaste-final.zip`. The ad-hoc app is not notarized: it must be downloaded with `curl` (or the install script), because a browser download is quarantined and blocked by Gatekeeper. Configuring the Apple secrets in the `release` environment restores the signed and notarized artifact with no workflow change.
-
-Apple Developer membership, a Developer ID identity, notarization credentials, and the protected release environment are owner prerequisites for the notarized artifact. They are never stored in this repository.
-
-The Linux tag workflow publishes the GitHub release first and then invokes the reusable macOS workflow with the same `v*` tag. A manual macOS run also requires an existing `v*` tag; it never uploads artifacts to a branch-named release.
+For the ad-hoc fallback, use `MCPaste-adhoc.zip`; checksum and `codesign --verify` still apply, while notarization assessment is not expected to pass.
 
 ## Release gate
 
-Before a tag is created, run the full local acceptance commands in the current handoff record, review `git diff`, and run the secret scan. A release tag, GitHub release, registry push, or notarization request is an external owner action and is not performed by local development.
+Before creating a tag, run the full CI command set, inspect `git diff`, run the hosted-term and secret-pattern audits, and verify the app on macOS 14 or later. Tag creation, signing, notarization, and upload are explicit maintainer actions.

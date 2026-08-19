@@ -73,6 +73,102 @@ func TestStorePublishesWholeSnapshotFromStagedAssets(t *testing.T) {
 	}
 }
 
+func TestStorePublishLocalRequiresAtomicExpectedRevision(t *testing.T) {
+	store := newTestStore(t, "mac-a", 100)
+	initial, err := store.PublishLocal(LocalUpdate{Text: "initial", ExpectedRevision: nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.PublishLocal(LocalUpdate{Text: "nil must not overwrite", ExpectedRevision: nil}); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("PublishLocal(nil over current) error = %v, want %v", err, ErrRevisionConflict)
+	}
+
+	exact, err := store.PublishLocal(LocalUpdate{Text: "exact", ExpectedRevision: revisionPtr(initial.Revision)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exact.Text != "exact" || exact.Revision.Compare(initial.Revision) <= 0 {
+		t.Fatalf("exact publish = %+v, want newer exact snapshot", exact)
+	}
+}
+
+func TestStorePublishConflictDoesNotConsumeAssetClockOrCurrent(t *testing.T) {
+	store := newTestStore(t, "mac-a", 100)
+	current, err := store.PublishLocal(LocalUpdate{Text: "current", ExpectedRevision: nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte{1, 2, 3}
+	asset := testAsset(data, "image/png")
+	if err := store.StageAsset(asset, data); err != nil {
+		t.Fatal(err)
+	}
+	mismatch := Revision{WallMillis: current.Revision.WallMillis - 1, DeviceID: "older"}
+	if _, err := store.PublishLocal(LocalUpdate{
+		Text:             "stale",
+		AssetDigests:     []string{asset.Digest},
+		ExpectedRevision: revisionPtr(mismatch),
+	}); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("PublishLocal(mismatch) error = %v, want %v", err, ErrRevisionConflict)
+	}
+
+	afterConflict, err := store.Manifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterConflict.Revision != current.Revision || afterConflict.Text != current.Text || len(afterConflict.Assets) != len(current.Assets) {
+		t.Fatalf("conflict changed current = %+v, want %+v", afterConflict, current)
+	}
+	committed, err := store.PublishLocal(LocalUpdate{
+		Text:             "winner",
+		AssetDigests:     []string{asset.Digest},
+		ExpectedRevision: revisionPtr(current.Revision),
+	})
+	if err != nil {
+		t.Fatalf("exact publish after conflict: %v", err)
+	}
+	if committed.Revision != (Revision{WallMillis: 100, Logical: 1, DeviceID: "mac-a"}) {
+		t.Fatalf("revision after conflict = %+v, want one clock tick", committed.Revision)
+	}
+	if len(committed.Assets) != 1 || committed.Assets[0] != asset {
+		t.Fatalf("staged asset was consumed by conflict: %+v", committed.Assets)
+	}
+}
+
+func TestStoreConcurrentPublishWithSameExpectedRevisionHasOneWinner(t *testing.T) {
+	store := newTestStore(t, "mac-a", 100)
+	current, err := store.PublishLocal(LocalUpdate{Text: "base", ExpectedRevision: nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	errorsByText := make(chan error, 2)
+	for _, text := range []string{"first", "second"} {
+		go func() {
+			<-start
+			_, publishErr := store.PublishLocal(LocalUpdate{Text: text, ExpectedRevision: revisionPtr(current.Revision)})
+			errorsByText <- publishErr
+		}()
+	}
+	close(start)
+	var successes, conflicts int
+	for i := 0; i < 2; i++ {
+		switch err := <-errorsByText; {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrRevisionConflict):
+			conflicts++
+		default:
+			t.Fatalf("concurrent publish error = %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("successes=%d conflicts=%d, want one each", successes, conflicts)
+	}
+}
+
 func TestStoreRejectsPartialRemoteSnapshotWithoutReplacingCurrent(t *testing.T) {
 	store := newTestStore(t, "mac-a", 100)
 	if _, err := store.PublishLocal(LocalUpdate{Text: "local"}); err != nil {
@@ -241,7 +337,7 @@ func TestStoreEmptyClearIsNewerAndEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cleared, err := store.PublishLocal(LocalUpdate{})
+	cleared, err := store.PublishLocal(LocalUpdate{ExpectedRevision: revisionPtr(before.Revision)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +438,7 @@ func TestStoreRejectsPoisoningRevisionsWithoutClockMutation(t *testing.T) {
 		t.Fatalf("invalid remote changed current: %+v", current)
 	}
 
-	after, err := store.PublishLocal(LocalUpdate{Text: "after"})
+	after, err := store.PublishLocal(LocalUpdate{Text: "after", ExpectedRevision: revisionPtr(before.Revision)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +457,7 @@ func TestStorePublishLocalReturnsClockExhaustedWithoutReplacingCurrent(t *testin
 	}
 
 	nowMillis.Store(math.MaxInt64)
-	if _, err := store.PublishLocal(LocalUpdate{Text: "must not publish"}); !errors.Is(err, ErrClockExhausted) {
+	if _, err := store.PublishLocal(LocalUpdate{Text: "must not publish", ExpectedRevision: revisionPtr(before.Revision)}); !errors.Is(err, ErrClockExhausted) {
 		t.Fatalf("PublishLocal(exhausted clock) error = %v, want %v", err, ErrClockExhausted)
 	}
 	current, err := store.Manifest()
@@ -447,7 +543,14 @@ func TestStoreSweepReleasesRestagedCurrentQuota(t *testing.T) {
 		}
 	}
 
-	manifest, err := store.PublishLocal(LocalUpdate{AssetDigests: []string{currentAsset.Digest}})
+	current, err := store.Manifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := store.PublishLocal(LocalUpdate{
+		AssetDigests:     []string{currentAsset.Digest},
+		ExpectedRevision: revisionPtr(current.Revision),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -737,7 +840,11 @@ func TestStoreAdoptsCurrentAssetsForLaterLocalPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	manifest, err := store.PublishLocal(LocalUpdate{Text: "local", AssetDigests: []string{asset.Digest}})
+	manifest, err := store.PublishLocal(LocalUpdate{
+		Text:             "local",
+		AssetDigests:     []string{asset.Digest},
+		ExpectedRevision: revisionPtr(remote.Revision),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -775,7 +882,15 @@ func TestStoreConcurrentReadersPublishersAndReachability(t *testing.T) {
 			defer wg.Done()
 			<-start
 			for i := 0; i < 100; i++ {
-				if _, err := store.PublishLocal(LocalUpdate{Text: fmt.Sprintf("publisher-%d-%d", worker, i)}); err != nil {
+				manifest, manifestErr := store.Manifest()
+				var expected *Revision
+				if manifestErr == nil {
+					expected = revisionPtr(manifest.Revision)
+				} else if !errors.Is(manifestErr, ErrNoContext) {
+					t.Errorf("Manifest() error = %v", manifestErr)
+					continue
+				}
+				if _, err := store.PublishLocal(LocalUpdate{Text: fmt.Sprintf("publisher-%d-%d", worker, i), ExpectedRevision: expected}); err != nil && !errors.Is(err, ErrRevisionConflict) {
 					t.Errorf("PublishLocal() error = %v", err)
 				}
 			}
@@ -842,6 +957,10 @@ func testAsset(data []byte, mime string) AssetManifest {
 func testDigest(data []byte) string {
 	digest := sha256.Sum256(data)
 	return fmt.Sprintf("%x", digest[:])
+}
+
+func revisionPtr(revision Revision) *Revision {
+	return &revision
 }
 
 func testRemoteManifest(wallMillis int64, sourceDeviceID, text string) ContextManifest {
