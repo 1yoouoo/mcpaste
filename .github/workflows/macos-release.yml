@@ -114,6 +114,7 @@ jobs:
           x86_bundle="$swift_x86_bin/MCPaste_MCPasteApp.bundle"
           test -d "$arm_bundle"
           test -d "$x86_bundle"
+          test -s Resources/AppIcon.icns
           diff -qr "$arm_bundle" "$x86_bundle"
 
           app="$RUNNER_TEMP/MCPaste.app"
@@ -123,7 +124,11 @@ jobs:
             "$swift_x86_bin/MCPaste" \
             -output "$app/Contents/MacOS/MCPaste"
           cp -R "$arm_bundle" "$app/Contents/Resources/"
+          cp Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
           cp Resources/Info.plist "$app/Contents/Info.plist"
+          test "$(plutil -extract CFBundleIconFile raw -o - "$app/Contents/Info.plist")" = AppIcon
+          ! plutil -extract LSUIElement raw -o - "$app/Contents/Info.plist" >/dev/null 2>&1
+          test -s "$app/Contents/Resources/AppIcon.icns"
 
           helper_arm="$RUNNER_TEMP/mcpaste-helper-arm64"
           helper_x86="$RUNNER_TEMP/mcpaste-helper-x86_64"

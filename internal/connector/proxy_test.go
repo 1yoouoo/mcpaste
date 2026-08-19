@@ -100,8 +100,8 @@ func TestProxyExposesCurrentContextPrompt(t *testing.T) {
 	}
 	session := connectProxyTestSession(t, proxy)
 	initialize := session.InitializeResult()
-	if initialize == nil || initialize.ServerInfo == nil || initialize.ServerInfo.Name != "mcpaste" || initialize.ServerInfo.Version != "0.2.1" {
-		t.Fatalf("server info = %#v, want mcpaste 0.2.1", initialize)
+	if initialize == nil || initialize.ServerInfo == nil || initialize.ServerInfo.Name != "mcpaste" || initialize.ServerInfo.Version != "0.2.2" {
+		t.Fatalf("server info = %#v, want mcpaste 0.2.2", initialize)
 	}
 	prompts, err := session.ListPrompts(context.Background(), nil)
 	if err != nil {
