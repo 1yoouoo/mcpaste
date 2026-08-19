@@ -230,7 +230,6 @@ private struct MenuRow: View {
 
     private var background: some ShapeStyle {
         if hovering { return AnyShapeStyle(Color.accentColor.opacity(0.18)) }
-        if prominent { return AnyShapeStyle(Color.accentColor.opacity(0.12)) }
         return AnyShapeStyle(Color.clear)
     }
 }

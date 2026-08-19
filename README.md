@@ -10,7 +10,7 @@ MCPaste is a local-first macOS app that makes one temporary text-and-image conte
 
 MCPaste works on one Mac too. To synchronize N Macs, install and open the same app on all N; no Mac has a special role.
 
-## Install MCPaste 0.2.2
+## Install MCPaste 0.2.3
 
 MCPaste requires macOS 14 or later and [Tailscale](https://tailscale.com/download). Install the latest signed release with one command:
 
@@ -18,11 +18,11 @@ MCPaste requires macOS 14 or later and [Tailscale](https://tailscale.com/downloa
 curl -fsSL https://raw.githubusercontent.com/1yoouoo/mcpaste/main/install.sh | sh
 ```
 
-The installer downloads [MCPaste v0.2.2](https://github.com/1yoouoo/mcpaste/releases/tag/v0.2.2) from GitHub Releases, verifies its SHA-256 checksum, installs it at `/Applications/MCPaste.app`, and links its embedded helper at `/usr/local/bin/mcpaste`. It prefers the notarized `MCPaste-final.zip` and falls back to the ad-hoc `MCPaste-adhoc.zip` when Apple signing credentials are unavailable.
+The installer downloads [MCPaste v0.2.3](https://github.com/1yoouoo/mcpaste/releases/tag/v0.2.3) from GitHub Releases, verifies its SHA-256 checksum, installs it at `/Applications/MCPaste.app`, and links its embedded helper at `/usr/local/bin/mcpaste`. It prefers the notarized `MCPaste-final.zip` and falls back to the ad-hoc `MCPaste-adhoc.zip` when Apple signing credentials are unavailable.
 
 To share the installation with a person or AI assistant, send this repository URL together with “download and install MCPaste”: <https://github.com/1yoouoo/mcpaste>
 
-For a manual install, download the macOS ZIP from the [v0.2.2 release](https://github.com/1yoouoo/mcpaste/releases/tag/v0.2.2), unzip `MCPaste.app` into `/Applications`, and open it. The one-line installer is recommended because it also installs the embedded MCP helper and verifies the release checksum.
+For a manual install, download the macOS ZIP from the [v0.2.3 release](https://github.com/1yoouoo/mcpaste/releases/tag/v0.2.3), unzip `MCPaste.app` into `/Applications`, and open it. The one-line installer is recommended because it also installs the embedded MCP helper and verifies the release checksum.
 
 Open MCPaste on each Mac. Restart the desired MCP client after registration so it loads the new MCP entry.
 

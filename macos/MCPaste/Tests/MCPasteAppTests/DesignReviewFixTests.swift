@@ -46,6 +46,13 @@ final class DesignReviewFixTests: XCTestCase {
         XCTAssertEqual(BlankContextAction.accessibilityLabel, "Start a blank shared context")
     }
 
+    func testEditorPlaceholderUsesTheNativeTextInsetVertically() {
+        XCTAssertEqual(
+            PasteTextEditorLayout.placeholderVerticalPadding,
+            PasteTextEditorLayout.textContainerInset.height
+        )
+    }
+
     func testCurrentSwiftUISourcesExcludeRetiredVocabulary() throws {
         let sourceRoot = try appSourceRoot()
         let forbidden = [

@@ -168,8 +168,8 @@ private struct ContextEditor: View {
                 Text("Write or paste text here…")
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 13)
-                    .padding(.vertical, 18)
+                    .padding(.horizontal, PasteTextEditorLayout.placeholderHorizontalPadding)
+                    .padding(.vertical, PasteTextEditorLayout.placeholderVerticalPadding)
                     .allowsHitTesting(false)
             }
         }

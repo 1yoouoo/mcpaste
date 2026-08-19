@@ -1,6 +1,12 @@
 import SwiftUI
 import AppKit
 
+enum PasteTextEditorLayout {
+    static let textContainerInset = NSSize(width: 8, height: 10)
+    static let placeholderHorizontalPadding: CGFloat = 13
+    static let placeholderVerticalPadding: CGFloat = 10
+}
+
 /// The paste editor.
 ///
 /// SwiftUI's `TextEditor` hands drops and pastes to its own text view, which turns a dropped
@@ -28,7 +34,7 @@ struct PasteTextEditor: NSViewRepresentable {
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.allowsUndo = true
         textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        textView.textContainerInset = NSSize(width: 8, height: 10)
+        textView.textContainerInset = PasteTextEditorLayout.textContainerInset
         textView.drawsBackground = false
         textView.string = text
         textView.registerForDraggedTypes(DroppedContent.acceptedTypes)
