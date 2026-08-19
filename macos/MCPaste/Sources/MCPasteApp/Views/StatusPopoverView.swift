@@ -160,10 +160,7 @@ private struct ConnectorSection: View {
                 .foregroundStyle(.secondary)
             ForEach(names, id: \.self) { name in
                 HStack(spacing: 8) {
-                    Image(systemName: "cable.connector.horizontal")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 18)
+                    ConnectorIconView(name: name)
                     Text(name)
                         .font(.callout)
                         .lineLimit(1)

@@ -16,7 +16,7 @@ func NewProxy(credential Credential) (*Proxy, error) {
 	if err != nil {
 		return nil, err
 	}
-	server := mcp.NewServer(&mcp.Implementation{Name: "mcpaste", Version: "0.2.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "mcpaste", Version: "0.2.1"}, nil)
 	server.AddTool(&mcp.Tool{
 		Name:        "get_latest_paste",
 		Description: "Retrieve the current MCPaste context.",

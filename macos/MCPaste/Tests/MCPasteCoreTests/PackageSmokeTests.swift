@@ -3,6 +3,6 @@ import XCTest
 
 final class PackageSmokeTests: XCTestCase {
     func testPackageLoads() {
-        XCTAssertEqual(MCPasteCoreVersion.current, "0.2.0")
+        XCTAssertEqual(MCPasteCoreVersion.current, "0.2.1")
     }
 }
