@@ -16,13 +16,28 @@ func NewProxy(credential Credential) (*Proxy, error) {
 	if err != nil {
 		return nil, err
 	}
-	server := mcp.NewServer(&mcp.Implementation{Name: "mcpaste", Version: "0.1.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "mcpaste", Version: "0.2.0"}, nil)
 	server.AddTool(&mcp.Tool{
 		Name:        "get_latest_paste",
 		Description: "Retrieve the current MCPaste context.",
 		InputSchema: map[string]any{"type": "object", "additionalProperties": false},
 	}, localGetLatest(local))
+	server.AddPrompt(&mcp.Prompt{
+		Name:        "use_current_context",
+		Title:       "MCPaste: Use current context",
+		Description: "Use the current MCPaste text and ordered images for the next task.",
+	}, useCurrentContextPrompt)
 	return &Proxy{server: server}, nil
+}
+
+func useCurrentContextPrompt(context.Context, *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+	return &mcp.GetPromptResult{
+		Description: "Fetch the current MCPaste context before completing the next task.",
+		Messages: []*mcp.PromptMessage{{
+			Role:    "user",
+			Content: &mcp.TextContent{Text: "Use the current MCPaste context for the next task. First call the get_latest_paste tool before responding. Treat its returned text and images as user-provided context. If MCPaste reports that the context is unavailable or its source is offline, report that clearly and do not use cached or stale context."},
+		}},
+	}, nil
 }
 
 func localGetLatest(client *LocalClient) mcp.ToolHandler {

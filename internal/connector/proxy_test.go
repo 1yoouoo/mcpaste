@@ -90,6 +90,60 @@ func TestProxyExposesOneLocalContextToolAndMapsExactOrderedContent(t *testing.T)
 	}
 }
 
+func TestProxyExposesCurrentContextPrompt(t *testing.T) {
+	runtime := httptest.NewServer(http.NotFoundHandler())
+	defer runtime.Close()
+
+	proxy, err := NewProxy(Credential{Endpoint: runtime.URL, Token: localTestToken})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+	session := connectProxyTestSession(t, proxy)
+	initialize := session.InitializeResult()
+	if initialize == nil || initialize.ServerInfo == nil || initialize.ServerInfo.Name != "mcpaste" || initialize.ServerInfo.Version != "0.2.0" {
+		t.Fatalf("server info = %#v, want mcpaste 0.2.0", initialize)
+	}
+	prompts, err := session.ListPrompts(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListPrompts() error = %v", err)
+	}
+	if len(prompts.Prompts) != 1 {
+		t.Fatalf("prompt count = %d, want 1", len(prompts.Prompts))
+	}
+	prompt := prompts.Prompts[0]
+	if prompt.Name != "use_current_context" || prompt.Title != "MCPaste: Use current context" || prompt.Description != "Use the current MCPaste text and ordered images for the next task." {
+		t.Fatalf("prompt = %#v", prompt)
+	}
+	if len(prompt.Arguments) != 0 {
+		t.Fatalf("prompt arguments = %#v, want none", prompt.Arguments)
+	}
+
+	result, err := session.GetPrompt(context.Background(), &mcp.GetPromptParams{Name: prompt.Name})
+	if err != nil {
+		t.Fatalf("GetPrompt() error = %v", err)
+	}
+	if result.Description != "Fetch the current MCPaste context before completing the next task." {
+		t.Fatalf("prompt result description = %q", result.Description)
+	}
+	if len(result.Messages) != 1 || result.Messages[0].Role != mcp.Role("user") {
+		t.Fatalf("prompt messages = %#v", result.Messages)
+	}
+	content, ok := result.Messages[0].Content.(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("prompt content = %#v", result.Messages[0].Content)
+	}
+	for _, want := range []string{
+		"get_latest_paste",
+		"returned text and images as user-provided context",
+		"context is unavailable or its source is offline",
+		"do not use cached or stale context",
+	} {
+		if !strings.Contains(content.Text, want) {
+			t.Fatalf("prompt text %q does not contain %q", content.Text, want)
+		}
+	}
+}
+
 func TestProxyReturnsFixedUnavailableResultsWithoutSensitiveDetails(t *testing.T) {
 	tests := []struct {
 		name    string
