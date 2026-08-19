@@ -86,13 +86,29 @@ func runPeer(ctx context.Context, args []string, stdin *os.File, readiness io.Wr
 	if *registryPath == "" {
 		*registryPath = filepath.Join(filepath.Dir(*credentialPath), "peers.json")
 	}
+	peerStdin, peerStdinWriter, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	copyDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(peerStdinWriter, stdin)
+		_ = peerStdinWriter.Close()
+		close(copyDone)
+	}()
+	defer func() {
+		_ = peerStdin.Close()
+		_ = peerStdinWriter.Close()
+		_ = stdin.Close()
+		<-copyDone
+	}()
 	return peer.Run(ctx, peer.RuntimeOptions{
 		DeviceID:       *deviceID,
 		DisplayName:    *name,
 		Port:           *port,
 		CredentialPath: *credentialPath,
 		RegistryPath:   *registryPath,
-		Stdin:          stdin,
+		Stdin:          peerStdin,
 		Readiness:      readiness,
 		Tailscale:      peer.TailscaleRunner{},
 		Now:            time.Now,
