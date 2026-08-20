@@ -68,6 +68,20 @@ actor PeerRuntimeProcess {
         }
         let credential = try prepareCredential()
         let metadata = prepareMetadata()
+        generation &+= 1
+        let startingGeneration = generation
+        lifecycle = .starting
+        if await adoptsExistingHelper(token: credential.token, deviceID: metadata.deviceID) {
+            guard lifecycle == .starting, generation == startingGeneration, child == nil else {
+                throw PeerRuntimeProcessError.startupFailed
+            }
+            lifecycle = .running
+            return try PeerRuntimeClient(
+                baseURL: URL(string: Self.endpoint)!,
+                token: credential.token,
+                session: session
+            )
+        }
         let process = Process()
         let stdin = Pipe()
         let stdout = Pipe()
@@ -90,13 +104,12 @@ actor PeerRuntimeProcess {
             try? stdin.fileHandleForReading.close()
             try? stdout.fileHandleForWriting.close()
             try? stdout.fileHandleForReading.close()
+            lifecycle = .idle
             throw PeerRuntimeProcessError.launchFailed
         }
         try? stdin.fileHandleForReading.close()
         try? stdout.fileHandleForWriting.close()
-        generation &+= 1
-        let launchedGeneration = generation
-        lifecycle = .starting
+        let launchedGeneration = startingGeneration
         child = process
         stdinWriter = stdin.fileHandleForWriting
         readinessReader = stdout.fileHandleForReading
@@ -131,8 +144,26 @@ actor PeerRuntimeProcess {
         }
     }
 
+    private func adoptsExistingHelper(token: String, deviceID: String) async -> Bool {
+        let deadline = Self.deadline(after: min(startupTimeout, 0.2))
+        var request = URLRequest(
+            url: URL(string: Self.endpoint + "/v1/health")!,
+            cachePolicy: .reloadIgnoringLocalCacheData,
+            timeoutInterval: min(max(startupTimeout, 0.01), 0.2)
+        )
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("1", forHTTPHeaderField: "X-MCPaste-Existing-Helper-Probe")
+        guard let loaded = try? await loadHealth(request, deadline: deadline) else { return false }
+        guard loaded.response.statusCode == 200 else { return false }
+        guard let object = try? JSONSerialization.jsonObject(with: loaded.data) as? [String: Any] else {
+            return false
+        }
+        return object["protocol_version"] as? Int == 1 && object["device_id"] as? String == deviceID
+    }
+
     func stop() async {
         guard let process = child else {
+            generation &+= 1
             lifecycle = .idle
             return
         }

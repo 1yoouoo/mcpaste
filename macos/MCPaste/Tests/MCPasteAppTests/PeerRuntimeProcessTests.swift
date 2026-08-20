@@ -325,6 +325,61 @@ final class PeerRuntimeProcessTests: XCTestCase {
         XCTAssertLessThanOrEqual(request.timeoutInterval, 2)
     }
 
+    func testExistingSameDeviceHelperIsAdoptedWithoutLaunchingOrStoppingIt() async throws {
+        let requests = LockedHealthRequests()
+        let launchMarker = directory.appendingPathComponent("adopted-helper-launched.txt")
+        RuntimeHealthURLProtocol.allowExistingHelperProbe(true)
+        RuntimeHealthURLProtocol.setHandler { request in
+            requests.append(request)
+            return .json(deviceID: self.deviceID)
+        }
+        let cli = try script(
+            """
+            #!/bin/sh
+            echo launched > '\(launchMarker.path)'
+            printf 'mcpaste-peer-ready\n'
+            cat >/dev/null
+            """
+        )
+        let process = makeRuntime(
+            cli: cli,
+            credential: directory.appendingPathComponent("adopted-helper/credential.json")
+        )
+
+        _ = try await process.start()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: launchMarker.path))
+        let request = try XCTUnwrap(requests.values.first)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8")
+
+        await process.stop()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: launchMarker.path))
+    }
+
+    func testStopDuringExistingHelperProbeCannotAdoptAfterStop() async throws {
+        let requested = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        RuntimeHealthURLProtocol.allowExistingHelperProbe(true)
+        RuntimeHealthURLProtocol.setHandler { _ in
+            requested.signal()
+            _ = release.wait(timeout: .now() + 1)
+            return .json(deviceID: self.deviceID)
+        }
+        let process = makeRuntime(
+            cli: try stdinRuntimeCLI(capture: directory.appendingPathComponent("stopped-adoption-args.txt")),
+            credential: directory.appendingPathComponent("stopped-adoption/credential.json"),
+            startupTimeout: 1
+        )
+        let starting = Task { try await process.start() }
+        XCTAssertEqual(requested.wait(timeout: .now() + 1), .success)
+
+        await process.stop()
+        release.signal()
+
+        await XCTAssertThrowsRuntimeProcessError(.startupFailed) { try await starting.value }
+    }
+
     func testImmediateExitWithoutReadinessNeverSendsBearerOrReturnsClient() async throws {
         let requests = LockedHealthRequests()
         RuntimeHealthURLProtocol.setHandler { request in
@@ -773,6 +828,7 @@ private final class RuntimeHealthURLProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     private static var handler: Handler?
     private static var stops = 0
+    private static var existingHelperProbeAllowed = false
     private let stateLock = NSLock()
     private var stopped = false
 
@@ -787,7 +843,11 @@ private final class RuntimeHealthURLProtocol: URLProtocol, @unchecked Sendable {
     }
 
     static func reset() {
-        lock.lock(); handler = nil; stops = 0; lock.unlock()
+        lock.lock(); handler = nil; stops = 0; existingHelperProbeAllowed = false; lock.unlock()
+    }
+
+    static func allowExistingHelperProbe(_ value: Bool) {
+        lock.lock(); existingHelperProbeAllowed = value; lock.unlock()
     }
 
     static var stopCount: Int {
@@ -799,9 +859,16 @@ private final class RuntimeHealthURLProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        Self.lock.lock(); let handler = Self.handler; Self.lock.unlock()
+        Self.lock.lock()
+        let handler = Self.handler
+        let isExistingHelperProbe = request.value(forHTTPHeaderField: "X-MCPaste-Existing-Helper-Probe") != nil
+        let existingHelperProbeAllowed = Self.existingHelperProbeAllowed
+        Self.lock.unlock()
         DispatchQueue.global().async { [self] in
             do {
+                if isExistingHelperProbe && !existingHelperProbeAllowed {
+                    throw URLError(.cannotConnectToHost)
+                }
                 let stub = try XCTUnwrap(handler)(request)
                 let deadline = Date().addingTimeInterval(stub.delay)
                 while Date() < deadline && !isStopped {
